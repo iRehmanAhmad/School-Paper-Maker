@@ -1,0 +1,207 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  SUPER_ADMIN
+  SCHOOL_ADMIN
+  TEACHER
+}
+
+enum QuestionType {
+  MCQ
+  TRUE_FALSE
+  FILL_BLANK
+  SHORT
+  LONG
+  MATCHING
+  DIAGRAM
+}
+
+enum Difficulty {
+  EASY
+  MEDIUM
+  HARD
+}
+
+enum ExamType {
+  WEEKLY
+  MONTHLY
+  CHAPTERWISE
+  QUARTERLY
+  HALF_YEARLY
+  ANNUAL
+}
+
+model School {
+  id            String   @id @default(cuid())
+  name          String
+  logoUrl       String?
+  subscription  String   @default("FREE")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  users         User[]
+  classes       Class[]
+  questions     Question[]
+  papers        Paper[]
+  templates     PaperTemplate[]
+}
+
+model User {
+  id            String   @id @default(cuid())
+  schoolId      String?
+  fullName      String
+  email         String   @unique
+  passwordHash  String
+  role          Role
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  school        School?  @relation(fields: [schoolId], references: [id], onDelete: SetNull)
+  papers        Paper[]  @relation("PaperCreatedBy")
+  templates     PaperTemplate[]
+
+  @@index([schoolId, role])
+}
+
+model Class {
+  id            String   @id @default(cuid())
+  schoolId      String
+  name          String
+  createdAt     DateTime @default(now())
+
+  school        School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  subjects      Subject[]
+
+  @@unique([schoolId, name])
+  @@index([schoolId])
+}
+
+model Subject {
+  id            String   @id @default(cuid())
+  classId       String
+  name          String
+  createdAt     DateTime @default(now())
+
+  class         Class    @relation(fields: [classId], references: [id], onDelete: Cascade)
+  chapters      Chapter[]
+
+  @@unique([classId, name])
+  @@index([classId])
+}
+
+model Chapter {
+  id            String   @id @default(cuid())
+  subjectId     String
+  title         String
+  chapterNumber Int
+  createdAt     DateTime @default(now())
+
+  subject       Subject   @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  questions     Question[]
+
+  @@unique([subjectId, chapterNumber])
+  @@index([subjectId])
+}
+
+model Question {
+  id            String       @id @default(cuid())
+  schoolId      String
+  chapterId     String
+  questionType  QuestionType
+  questionText  String       @db.Text
+  optionA       String?
+  optionB       String?
+  optionC       String?
+  optionD       String?
+  correctAnswer String?
+  difficulty    Difficulty
+  marks         Int
+  explanation   String?      @db.Text
+  createdAt     DateTime     @default(now())
+
+  school        School       @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  chapter       Chapter      @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  paperQuestions PaperQuestion[]
+
+  @@index([schoolId, chapterId])
+  @@index([chapterId, questionType, difficulty])
+  @@index([schoolId, questionType, difficulty])
+}
+
+model PaperTemplate {
+  id                   String   @id @default(cuid())
+  schoolId             String
+  teacherId            String
+  name                 String
+  examType             ExamType
+  classId              String
+  subjectId            String
+  structureJson        Json
+  difficultyJson       Json
+  layoutJson           Json
+  createdAt            DateTime @default(now())
+
+  school               School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  teacher              User     @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+
+  @@index([schoolId, teacherId])
+}
+
+model Paper {
+  id                   String   @id @default(cuid())
+  schoolId             String
+  createdById          String
+  classId              String
+  subjectId            String
+  title                String
+  examName             String
+  examType             ExamType
+  timeMinutes          Int
+  totalMarks           Int
+  instructions         String?  @db.Text
+  metadataJson         Json
+  createdAt            DateTime @default(now())
+
+  school               School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  createdBy            User     @relation("PaperCreatedBy", fields: [createdById], references: [id], onDelete: Cascade)
+  sets                 PaperSet[]
+
+  @@index([schoolId, classId, subjectId])
+  @@index([schoolId, createdAt])
+}
+
+model PaperSet {
+  id                   String   @id @default(cuid())
+  paperId              String
+  label                String
+  orderIndex           Int
+  createdAt            DateTime @default(now())
+
+  paper                Paper    @relation(fields: [paperId], references: [id], onDelete: Cascade)
+  questions            PaperQuestion[]
+
+  @@index([paperId, orderIndex])
+}
+
+model PaperQuestion {
+  id                   String   @id @default(cuid())
+  paperSetId           String
+  questionId           String
+  section              String
+  orderIndex           Int
+  shuffledOptionsJson  Json?
+
+  paperSet             PaperSet  @relation(fields: [paperSetId], references: [id], onDelete: Cascade)
+  question             Question  @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@unique([paperSetId, orderIndex])
+  @@index([paperSetId])
+  @@index([questionId])
+}

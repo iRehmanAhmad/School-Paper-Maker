@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-bg: #f6f3ee;
+  --color-card: #fffdf8;
+  --color-ink: #1f2a37;
+  --color-brand: #0f6f8f;
+  --color-accent: #f59e0b;
+  --shadow-soft: 0 10px 30px -14px rgba(15, 111, 143, 0.32);
+}
+
+.dark {
+  --color-bg: #0f172a;
+  --color-card: #1e293b;
+  --color-ink: #f1f5f9;
+  --color-brand: #38bdf8;
+  --color-accent: #fbbf24;
+  --shadow-soft: 0 10px 30px -14px rgba(0, 0, 0, 0.5);
+}
+
+body {
+  @apply font-body text-ink bg-bg min-h-screen;
+  background-image: radial-gradient(circle at 10% 20%, rgba(15, 111, 143, 0.08), transparent 38%), radial-gradient(circle at 90% 0%, rgba(245, 158, 11, 0.1), transparent 34%);
+}
+
+.dark body {
+  background-image: radial-gradient(circle at 10% 20%, rgba(56, 189, 248, 0.05), transparent 38%), radial-gradient(circle at 90% 0%, rgba(251, 191, 36, 0.05), transparent 34%);
+}
+
+.paper-lines {
+  background-image: linear-gradient(to bottom, transparent calc(1.6rem - 1px), rgba(31, 42, 55, 0.18) 1px);
+  background-size: 100% 1.6rem;
+}

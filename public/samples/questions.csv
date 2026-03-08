@@ -1,0 +1,4 @@
+chapter_title,chapter_number,question_type,question_text,option_a,option_b,option_c,option_d,correct_answer,difficulty,bloom_level,marks,explanation
+Plants,1,mcq,What is the process by which plants make food?,Respiration,Photosynthesis,Digestion,Excretion,B,easy,remember,1,Student chooses photosynthesis
+Plants,1,short,Why are roots important?,,,,,,medium,understand,2,Any two valid root functions
+Human Body,2,long,Explain the function of heart in detail.,,,,,,hard,analyze,5,Explain pumping and circulation

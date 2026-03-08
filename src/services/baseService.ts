@@ -1,0 +1,402 @@
+import type {
+  Blueprint,
+  ChapterEntity,
+  ChapterWeightage,
+  ClassEntity,
+  ExamBody,
+  Paper,
+  PaperTemplate,
+  PaperQuestion,
+  Question,
+  QuestionUsage,
+  School,
+  SubjectEntity,
+  UserProfile,
+} from "@/types/domain";
+
+export const DB = {
+  schools: "pg_schools",
+  examBodies: "pg_exam_bodies",
+  users: "pg_users",
+  classes: "pg_classes",
+  subjects: "pg_subjects",
+  chapters: "pg_chapters",
+  questions: "pg_questions",
+  blueprints: "pg_blueprints",
+  weightage: "pg_weightage",
+  papers: "pg_papers",
+  paperQuestions: "pg_paper_questions",
+  usage: "pg_usage",
+  templates: "pg_templates",
+} as const;
+
+export type Key = (typeof DB)[keyof typeof DB];
+
+export function readLocal<T>(key: Key): T[] {
+  const raw = localStorage.getItem(key);
+  if (!raw) {
+    return [];
+  }
+  try {
+    return JSON.parse(raw) as T[];
+  } catch {
+    return [];
+  }
+}
+
+export function writeLocal<T>(key: Key, rows: T[]) {
+  try {
+    localStorage.setItem(key, JSON.stringify(rows));
+  } catch (e: any) {
+    if (e.name === "QuotaExceededError" || e.code === 22 || e.code === 1014) {
+      console.warn(`Storage quota exceeded for key: ${key}. Attempting automatic pruning...`);
+
+      const historicalKeys: Key[] = [DB.papers, DB.usage, DB.paperQuestions];
+
+      // 1. Prune OTHER historical collections first
+      historicalKeys.filter(hk => hk !== key).forEach(hKey => {
+        const data = readLocal(hKey);
+        if (data.length > 5) {
+          const pruneCount = Math.floor(data.length * 0.5);
+          const prunedData = data.slice(0, data.length - pruneCount);
+          try {
+            localStorage.setItem(hKey, JSON.stringify(prunedData));
+          } catch (innerE) {
+            console.error(`Emergency: Failed to prune ${hKey}`, innerE);
+          }
+        }
+      });
+
+      // 2. Prune the current 'rows' array if it's a historical collection
+      let localRows = rows;
+      if (historicalKeys.includes(key) && rows.length > 10) {
+        console.log(`Pruning current collection: ${key}`);
+        localRows = rows.slice(0, Math.floor(rows.length * 0.5));
+      }
+
+      try {
+        localStorage.setItem(key, JSON.stringify(localRows));
+        console.log(`Pruning successful. ${key} saved after reduction.`);
+      } catch (retryE) {
+        console.error("Pruning failed to free enough space for even a reduced collection.", retryE);
+        // Last resort: wipe oldest papers entirely
+        if (key === DB.papers) {
+          localStorage.setItem(DB.papers, JSON.stringify(rows.slice(0, 5)));
+          return;
+        }
+        throw retryE;
+      }
+    } else {
+      throw e;
+    }
+  }
+}
+
+export function normalizeText(value: string) {
+  return value.trim().toLowerCase();
+}
+
+export function assertUniqueName(values: string[], nextValue: string, label: string) {
+  const normalized = normalizeText(nextValue);
+  const exists = values.some((value) => normalizeText(value) === normalized);
+  if (exists) {
+    throw new Error(`${label} already exists`);
+  }
+}
+
+export type DeleteImpact = {
+  classes: number;
+  subjects: number;
+  chapters: number;
+  questions: number;
+};
+
+function ensureScienceChapter2DummyQuestions() {
+  const school = readLocal<School>(DB.schools)[0];
+  if (!school) {
+    return;
+  }
+
+  const class5 = readLocal<ClassEntity>(DB.classes).find((c) => normalizeText(c.name) === "class 5");
+  if (!class5) {
+    return;
+  }
+
+  const scienceSubject = readLocal<SubjectEntity>(DB.subjects).find((s) => s.class_id === class5.id && normalizeText(s.name) === "science");
+  if (!scienceSubject) {
+    return;
+  }
+
+  const chapters = readLocal<ChapterEntity>(DB.chapters);
+  let chapter2 = chapters.find((c) => c.subject_id === scienceSubject.id && c.chapter_number === 2);
+  if (!chapter2) {
+    chapter2 = {
+      id: crypto.randomUUID(),
+      subject_id: scienceSubject.id,
+      title: "Fundamental Concepts",
+      chapter_number: 2,
+      created_at: new Date().toISOString(),
+    };
+    chapters.unshift(chapter2);
+    writeLocal(DB.chapters, chapters);
+  } else if (chapter2.title !== "Fundamental Concepts") {
+    chapter2.title = "Fundamental Concepts";
+    writeLocal(DB.chapters, chapters);
+  }
+
+  const allQuestions = readLocal<Question>(DB.questions);
+  const hasType = (type: Question["question_type"]) => allQuestions.some((q) => q.chapter_id === chapter2.id && q.question_type === type);
+  const now = new Date().toISOString();
+  const toAdd: Question[] = [];
+
+  if (!hasType("mcq")) {
+    toAdd.push({
+      id: crypto.randomUUID(),
+      chapter_id: chapter2.id,
+      school_id: school.id,
+      question_type: "mcq",
+      question_text: "Which state of matter has fixed shape and fixed volume?",
+      option_a: "Solid",
+      option_b: "Liquid",
+      option_c: "Gas",
+      option_d: "Plasma",
+      correct_answer: "A",
+      difficulty: "easy",
+      bloom_level: "remember",
+      question_level: "exercise",
+      marks: 1,
+      explanation: "A solid has fixed shape and volume.",
+      created_at: now,
+      diagram_url: null,
+    });
+  }
+
+  if (!hasType("true_false")) {
+    toAdd.push({
+      id: crypto.randomUUID(),
+      chapter_id: chapter2.id,
+      school_id: school.id,
+      question_type: "true_false",
+      question_text: "Water can exist as solid, liquid and gas.",
+      option_a: "True",
+      option_b: "False",
+      option_c: null,
+      option_d: null,
+      correct_answer: "A",
+      difficulty: "easy",
+      bloom_level: "understand",
+      question_level: "exercise",
+      marks: 1,
+      explanation: "Ice, liquid water and water vapor are all forms of water.",
+      created_at: now,
+      diagram_url: null,
+    });
+  }
+
+  if (!hasType("fill_blanks")) {
+    toAdd.push({
+      id: crypto.randomUUID(),
+      chapter_id: chapter2.id,
+      school_id: school.id,
+      question_type: "fill_blanks",
+      question_text: "The change of liquid water into vapor is called ________.",
+      option_a: null,
+      option_b: null,
+      option_c: null,
+      option_d: null,
+      correct_answer: "evaporation",
+      difficulty: "easy",
+      bloom_level: "remember",
+      question_level: "examples",
+      marks: 1,
+      explanation: "Evaporation changes liquid into gas.",
+      created_at: now,
+      diagram_url: null,
+    });
+  }
+
+  if (!hasType("short")) {
+    toAdd.push({
+      id: crypto.randomUUID(),
+      chapter_id: chapter2.id,
+      school_id: school.id,
+      question_type: "short",
+      question_text: "Define force and write one daily-life example.",
+      option_a: null,
+      option_b: null,
+      option_c: null,
+      option_d: null,
+      correct_answer: "Force is a push or pull. Example: pushing a door.",
+      difficulty: "medium",
+      bloom_level: "understand",
+      question_level: "conceptual",
+      marks: 2,
+      explanation: "Must include both definition and one valid example.",
+      created_at: now,
+      diagram_url: null,
+    });
+  }
+
+  if (!hasType("long")) {
+    toAdd.push({
+      id: crypto.randomUUID(),
+      chapter_id: chapter2.id,
+      school_id: school.id,
+      question_type: "long",
+      question_text: "Explain the water cycle with evaporation, condensation and precipitation.",
+      option_a: null,
+      option_b: null,
+      option_c: null,
+      option_d: null,
+      correct_answer: "Evaporation -> condensation -> precipitation -> collection.",
+      difficulty: "medium",
+      bloom_level: "apply",
+      question_level: "conceptual",
+      marks: 5,
+      explanation: "Answer should explain all major stages in sequence.",
+      created_at: now,
+      diagram_url: null,
+    });
+  }
+
+  if (!hasType("matching")) {
+    toAdd.push({
+      id: crypto.randomUUID(),
+      chapter_id: chapter2.id,
+      school_id: school.id,
+      question_type: "matching",
+      question_text: "Match terms: A) Evaporation B) Condensation C) Precipitation",
+      option_a: "Liquid to gas",
+      option_b: "Gas to liquid",
+      option_c: "Water falls from clouds",
+      option_d: null,
+      correct_answer: "A-1;B-2;C-3",
+      difficulty: "medium",
+      bloom_level: "understand",
+      question_level: "exercise",
+      marks: 2,
+      explanation: "Each term should be matched with correct meaning.",
+      created_at: now,
+      diagram_url: null,
+    });
+  }
+
+  if (!hasType("diagram")) {
+    toAdd.push({
+      id: crypto.randomUUID(),
+      chapter_id: chapter2.id,
+      school_id: school.id,
+      question_type: "diagram",
+      question_text: "Label the stages shown in the water cycle diagram.",
+      option_a: null,
+      option_b: null,
+      option_c: null,
+      option_d: null,
+      correct_answer: "Evaporation, Condensation, Precipitation",
+      difficulty: "hard",
+      bloom_level: "analyze",
+      question_level: "additional",
+      marks: 3,
+      explanation: "Students should identify each labeled stage correctly.",
+      created_at: now,
+      diagram_url: "https://picsum.photos/seed/water-cycle/640/280",
+    });
+  }
+
+  if (toAdd.length) {
+    writeLocal(DB.questions, [...toAdd, ...allQuestions]);
+  }
+}
+
+export function ensureSeed() {
+  const hasExisting = readLocal<School>(DB.schools).length > 0;
+  const hasBodies = readLocal<ExamBody>(DB.examBodies).length > 0;
+  if (hasExisting && hasBodies) {
+    ensureScienceChapter2DummyQuestions();
+    return;
+  }
+  Object.values(DB).forEach((key) => localStorage.removeItem(key));
+  const schoolId = crypto.randomUUID();
+  const punjabBody = crypto.randomUUID();
+  const sindhBody = crypto.randomUUID();
+  const kpkBody = crypto.randomUUID();
+  const classPunjab5 = crypto.randomUUID();
+  const classSindh5 = crypto.randomUUID();
+  const classKpk5 = crypto.randomUUID();
+  const subjectPunjabSci = crypto.randomUUID();
+  const subjectPunjabMath = crypto.randomUUID();
+  const subjectSindhSci = crypto.randomUUID();
+  const subjectKpkSci = crypto.randomUUID();
+  const ch1 = crypto.randomUUID();
+  const ch2 = crypto.randomUUID();
+  const ch3 = crypto.randomUUID();
+  const now = new Date().toISOString();
+
+  writeLocal<School>(DB.schools, [{ id: schoolId, name: "ABC Public School", created_at: now }]);
+  writeLocal<ExamBody>(DB.examBodies, [
+    { id: punjabBody, school_id: schoolId, name: "Punjab Govt", created_at: now },
+    { id: sindhBody, school_id: schoolId, name: "Sindh Govt", created_at: now },
+    { id: kpkBody, school_id: schoolId, name: "KPK Govt", created_at: now },
+  ]);
+  writeLocal<UserProfile>(DB.users, [
+    { id: crypto.randomUUID(), email: "admin@demo.school", role: "admin", school_id: schoolId, full_name: "Demo Admin", created_at: now },
+    { id: crypto.randomUUID(), email: "teacher@demo.school", role: "teacher", school_id: schoolId, full_name: "Demo Teacher", created_at: now },
+  ]);
+  writeLocal<ClassEntity>(DB.classes, [
+    { id: classPunjab5, school_id: schoolId, exam_body_id: punjabBody, name: "Class 5", created_at: now },
+    { id: classSindh5, school_id: schoolId, exam_body_id: sindhBody, name: "Class 5", created_at: now },
+    { id: classKpk5, school_id: schoolId, exam_body_id: kpkBody, name: "Class 5", created_at: now },
+  ]);
+  writeLocal<SubjectEntity>(DB.subjects, [
+    { id: subjectPunjabSci, class_id: classPunjab5, name: "Science", created_at: now },
+    { id: subjectPunjabMath, class_id: classPunjab5, name: "Mathematics", created_at: now },
+    { id: subjectSindhSci, class_id: classSindh5, name: "Science", created_at: now },
+    { id: subjectKpkSci, class_id: classKpk5, name: "Science", created_at: now },
+  ]);
+  writeLocal<ChapterEntity>(DB.chapters, [
+    { id: ch1, subject_id: subjectPunjabSci, title: "Plants", chapter_number: 1, created_at: now },
+    { id: ch2, subject_id: subjectPunjabSci, title: "Human Body", chapter_number: 2, created_at: now },
+    { id: ch3, subject_id: subjectPunjabSci, title: "Matter", chapter_number: 3, created_at: now },
+  ]);
+  writeLocal<ChapterWeightage>(DB.weightage, [
+    { id: crypto.randomUUID(), chapter_id: ch1, exam_type: "monthly", weight_percent: 20 },
+    { id: crypto.randomUUID(), chapter_id: ch2, exam_type: "monthly", weight_percent: 40 },
+    { id: crypto.randomUUID(), chapter_id: ch3, exam_type: "monthly", weight_percent: 40 },
+  ]);
+
+  const difficulties = ["easy", "medium", "hard"] as const;
+  const blooms = ["remember", "understand", "apply", "analyze", "evaluate"] as const;
+  const types = ["mcq", "true_false", "fill_blanks", "short", "long", "matching", "diagram"] as const;
+  const questionRows: Question[] = [];
+  for (let i = 1; i <= 300; i += 1) {
+    const chapterId = [ch1, ch2, ch3][i % 3];
+    const t = types[i % types.length];
+    const marks = t === "long" ? 5 : t === "short" ? 2 : 1;
+    questionRows.push({
+      id: crypto.randomUUID(),
+      chapter_id: chapterId,
+      school_id: schoolId,
+      question_type: t,
+      question_text: `Sample ${t} question ${i}`,
+      option_a: "Option A",
+      option_b: "Option B",
+      option_c: "Option C",
+      option_d: "Option D",
+      correct_answer: "A",
+      difficulty: difficulties[i % 3],
+      bloom_level: blooms[i % blooms.length],
+      question_level: (["exercise", "additional", "past_papers", "examples", "conceptual"] as const)[i % 5],
+      marks,
+      explanation: `Marking note for question ${i}`,
+      created_at: now,
+      diagram_url: t === "diagram" ? "https://picsum.photos/seed/diagram/500/240" : null,
+    });
+  }
+  writeLocal(DB.questions, questionRows);
+  writeLocal(DB.blueprints, []);
+  writeLocal(DB.papers, []);
+  writeLocal(DB.paperQuestions, []);
+  writeLocal(DB.usage, []);
+  writeLocal(DB.templates, []);
+  ensureScienceChapter2DummyQuestions();
+}
