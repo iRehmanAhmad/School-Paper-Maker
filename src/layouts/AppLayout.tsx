@@ -1,4 +1,5 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { useState, useCallback, useEffect } from "react";
 import { useAppStore } from "@/store/useAppStore";
 import { BookOpen, ChartPie, FileCog, FileOutput, Folder, GraduationCap, LayoutDashboard, ListChecks, LogOut, Settings, Shapes } from "lucide-react";
 
@@ -64,15 +65,75 @@ export function AppLayout() {
               );
             })}
           </nav>
-          <button onClick={logout} className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg bg-slate-800 dark:bg-slate-700 px-3 py-2 text-sm text-white hover:bg-slate-900 transition-colors">
-            <LogOut size={14} />
-            Logout
-          </button>
+
+          {profile?.role === "teacher" && (
+            <div className="mt-8 mb-4">
+              <h3 className="px-3 text-xs font-black uppercase text-slate-400 tracking-widest mb-2 flex items-center gap-2">
+                <Folder size={12} /> My Papers
+              </h3>
+              <SavedPapersWidget teacherId={profile.id} />
+            </div>
+          )}
+
+          <div className="mt-auto pt-4 border-t border-slate-100 dark:border-slate-800">
+            <button onClick={logout} className="flex w-full items-center justify-center gap-2 rounded-lg bg-slate-100 dark:bg-slate-700/50 px-3 py-2 text-sm text-slate-600 dark:text-slate-300 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-900/30 dark:hover:text-rose-400 transition-colors font-semibold">
+              <LogOut size={16} />
+              Logout
+            </button>
+          </div>
         </aside>
-        <main className="flex-1 min-w-0 p-4 sm:p-6">
+        <main className="flex-1 min-w-0 p-4 sm:p-6 bg-slate-50/50 dark:bg-slate-900">
           <Outlet />
         </main>
       </div>
+    </div>
+  );
+}
+
+function SavedPapersWidget({ teacherId }: { teacherId: string }) {
+  const [papers, setPapers] = useState<any[]>([]);
+
+  const loadPapers = useCallback(async () => {
+    // We import inline to avoid circular dependencies if any, or just use localStorage directly since service requires async handling
+    try {
+      const { getPapersByTeacher } = await import("@/services/paperService");
+      const list = await getPapersByTeacher(teacherId);
+      // Only show papers that have a custom paperName saved
+      const namedPapers = list.filter((p) => (p.settings_json as any)?.header?.paperName);
+      setPapers(namedPapers.slice(0, 5)); // Show top 5 recent
+    } catch (e) { console.error(e); }
+  }, [teacherId]);
+
+  useEffect(() => {
+    loadPapers();
+    window.addEventListener("storage", loadPapers);
+    return () => window.removeEventListener("storage", loadPapers);
+  }, [loadPapers]);
+
+  const navigate = useNavigate();
+
+  if (papers.length === 0) {
+    return (
+      <div className="px-3 py-4 text-center text-xs text-slate-400 bg-slate-50 dark:bg-slate-800/30 rounded-xl border border-dashed border-slate-200 dark:border-slate-700">
+        No saved papers yet.<br />Save one from the generator!
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      {papers.map((p) => (
+        <button
+          key={p.id}
+          className="flex flex-col items-start gap-1 rounded-lg px-3 py-2 text-sm transition-all text-slate-600 dark:text-slate-400 hover:bg-bg dark:hover:bg-slate-800/80 hover:text-brand text-left w-full group"
+          onClick={() => {
+            navigate(`/paper-generator?load=${p.id}`);
+          }}
+        >
+          <span className="font-semibold truncate w-full group-hover:text-brand transition-colors text-slate-700 dark:text-slate-300">{(p.settings_json as any).header.paperName}</span>
+          <span className="text-[10px] text-slate-400">{new Date(p.created_at).toLocaleDateString()}</span>
+        </button>
+      ))}
     </div>
   );
 }

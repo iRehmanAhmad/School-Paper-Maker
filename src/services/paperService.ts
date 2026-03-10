@@ -39,6 +39,84 @@ export async function getPapersByTeacher(teacherId: string) {
     return readLocal<Paper>(DB.papers).filter((p) => p.teacher_id === teacherId).sort((a, b) => b.created_at.localeCompare(a.created_at));
 }
 
+export async function getPaperBundleById(paperId: string): Promise<any | null> {
+    ensureSeed();
+    let paper: Paper | undefined;
+    let mappings: PaperQuestion[] = [];
+
+    if (hasSupabase && supabase) {
+        const { data: pData } = await supabase.from("papers").select("*").eq("id", paperId).single();
+        if (!pData) return null;
+        paper = pData as Paper;
+
+        const { data: mData } = await supabase.from("paper_questions").select("*").eq("paper_id", paperId);
+        mappings = (mData ?? []) as PaperQuestion[];
+    } else {
+        paper = readLocal<Paper>(DB.papers).find(p => p.id === paperId);
+        if (!paper) return null;
+        mappings = readLocal<PaperQuestion>(DB.paperQuestions).filter(pq => pq.paper_id === paperId);
+    }
+
+    const questionIds = Array.from(new Set(mappings.map(m => m.question_id)));
+    const schoolId = (await import('@/store/useAppStore')).useAppStore.getState().profile?.school_id;
+    if (!schoolId) return null;
+    const allQuestions = await import("./questionService").then(m => m.getQuestions(schoolId));
+    const questionsMap = new Map(allQuestions.filter(q => questionIds.includes(q.id)).map(q => [q.id, q]));
+
+    // Group mappings by set
+    const setGroups = mappings.reduce((acc, m) => {
+        if (!acc[m.paper_set]) acc[m.paper_set] = [];
+        acc[m.paper_set].push(m);
+        return acc;
+    }, {} as Record<string, PaperQuestion[]>);
+
+    const settings = paper.settings_json as any;
+    console.log("[DEBUG] Reconstructing Paper:", paperId);
+    console.log("[DEBUG] Mappings found:", mappings.length);
+    console.log("[DEBUG] Questions found from DB:", questionsMap.size);
+    console.log("[DEBUG] Settings JSON structure:", JSON.stringify(settings, null, 2));
+
+    const sets = Object.entries(setGroups).map(([setId, setMappings]) => {
+        const sortedMappings = [...setMappings].sort((a, b) => a.order_number - b.order_number);
+
+        const generatedQs = sortedMappings.map((m) => {
+            const q = questionsMap.get(m.question_id);
+            if (!q) {
+                console.log("[DEBUG] Question missing from map for ID:", m.question_id);
+                return null;
+            }
+
+            // Reapply settings payload just like Engine did
+            const matchingSection = settings.sections?.find((s: any) => s.type === q.question_type);
+            const isObjective = ["mcq", "true_false", "fill_blanks", "matching"].includes(q.question_type);
+            return {
+                id: q.id,
+                orderNumber: m.order_number,
+                setLabel: m.paper_set,
+                section: isObjective ? "Objective Section" : "Subjective Section",
+                questionType: q.question_type,
+                questionText: q.question_text,
+                options: m.shuffled_options || [q.option_a, q.option_b, q.option_c, q.option_d].filter(Boolean) as string[],
+                correctAnswer: q.correct_answer,
+                marks: matchingSection?.marks || 1,
+                emptyLines: matchingSection?.empty_lines,
+                explanation: q.explanation,
+                diagramUrl: q.diagram_url,
+            };
+        }).filter(Boolean);
+
+        return {
+            set_id: setId,
+            questions: generatedQs
+        };
+    });
+
+    return {
+        paper,
+        sets
+    };
+}
+
 export async function getStats(schoolId: string, teacherId: string) {
     const [questions, classes, subjects, chapters, papers] = await Promise.all([
         getQuestions(schoolId),
@@ -67,6 +145,18 @@ export async function getBlueprints(subjectIds: string[]) {
         return (data ?? []) as Blueprint[];
     }
     return readLocal<Blueprint>(DB.blueprints).filter((b) => subjectIds.includes(b.subject_id));
+}
+
+export async function getBlueprintById(blueprintId: string) {
+    ensureSeed();
+    if (hasSupabase && supabase) {
+        const { data, error } = await supabase.from("blueprints").select("*").eq("id", blueprintId).maybeSingle();
+        if (error) {
+            throw error;
+        }
+        return (data ?? null) as Blueprint | null;
+    }
+    return readLocal<Blueprint>(DB.blueprints).find((b) => b.id === blueprintId) ?? null;
 }
 
 export async function addBlueprint(row: Omit<Blueprint, "id">) {

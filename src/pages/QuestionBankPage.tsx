@@ -1,12 +1,18 @@
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { downloadQuestionTemplate } from "@/utils/templateGenerator";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import { discussGenerationStrategy, generateQuestionsFromPdf, type AIGeneratedQuestion, type ChatMessage } from "@/services/ai";
-import { addQuestions, deleteQuestionsByIds, getQuestions } from "@/services/repositories";
+import { ConfirmModal } from "@/components/ConfirmModal";
+import { ContextBreadcrumbs } from "@/components/ContextBreadcrumbs";
+import { EmptyState } from "@/components/EmptyState";
+import { useHierarchyScopeParams } from "@/hooks/useHierarchyScopeParams";
+import { addQuestions, deleteQuestionsByIds, getQuestions, updateQuestionById } from "@/services/repositories";
+import { useUndoDeleteQueue } from "@/hooks/useUndoDeleteQueue";
 import { useAppStore } from "@/store/useAppStore";
 import { useHierarchy } from "@/hooks/useHierarchy";
-import { AdminTable } from "@/components/AdminTable";
+import { hierarchyScopeToSearch } from "@/utils/hierarchyScope";
 import type { BloomLevel, Difficulty, Question, QuestionLevel, QuestionType } from "@/types/domain";
 
 const questionTypes: QuestionType[] = ["mcq", "true_false", "fill_blanks", "short", "long", "matching", "diagram"];
@@ -68,10 +74,33 @@ type UploadPreviewRow = {
   mapped?: Omit<Question, "id" | "created_at">;
 };
 
+type EditQuestionDraft = {
+  question_text: string;
+  option_a: string;
+  option_b: string;
+  option_c: string;
+  option_d: string;
+  correct_answer: string;
+  difficulty: Difficulty;
+  bloom_level: BloomLevel | "";
+  question_level: QuestionLevel;
+  explanation: string;
+  diagram_url: string;
+};
+
+type DeleteQuestionIntent = {
+  ids: string[];
+  snapshots: Question[];
+  message: string;
+};
+
 
 export function QuestionBankPage() {
+  const navigate = useNavigate();
   const profile = useAppStore((s) => s.profile);
   const toast = useAppStore((s) => s.pushToast);
+  const { scope, mergeScope, clearFrom, scopeToLevel } = useHierarchyScopeParams();
+  const { queueDelete } = useUndoDeleteQueue();
 
   const [viewMode, setViewMode] = useState<"add" | "manage">("manage");
   const {
@@ -87,12 +116,21 @@ export function QuestionBankPage() {
     setSubjectId,
     chapterId,
     setChapterId,
-  } = useHierarchy(profile?.school_id);
+  } = useHierarchy(profile?.school_id, { initialScope: scope, autoSelectFirst: false });
 
   const [rowsCount, setRowsCount] = useState(0);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [loadingQuestions, setLoadingQuestions] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [manageDifficulty, setManageDifficulty] = useState<Difficulty | "all">("all");
+  const [manageType, setManageType] = useState<QuestionType | "all">("all");
+  const [manageBloom, setManageBloom] = useState<BloomLevel | "all">("all");
+  const [selectedQuestionIds, setSelectedQuestionIds] = useState<string[]>([]);
+  const [editingQuestion, setEditingQuestion] = useState<Question | null>(null);
+  const [editDraft, setEditDraft] = useState<EditQuestionDraft | null>(null);
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [deleteIntent, setDeleteIntent] = useState<DeleteQuestionIntent | null>(null);
+  const [isDeletingQuestions, setIsDeletingQuestions] = useState(false);
 
   const [entryMode, setEntryMode] = useState<"manual" | "upload" | "ai" | "">("");
 
@@ -173,6 +211,88 @@ export function QuestionBankPage() {
 
   const visibleSubjects = useMemo(() => subjects.filter((s) => !classId || s.class_id === classId), [subjects, classId]);
   const visibleChapters = useMemo(() => chapters.filter((c) => !subjectId || c.subject_id === subjectId), [chapters, subjectId]);
+  const selectedExamBodyName = examBodies.find((b) => b.id === examBodyId)?.name;
+  const selectedClassName = classes.find((c) => c.id === classId)?.name;
+  const selectedSubjectName = subjects.find((s) => s.id === subjectId)?.name;
+  const selectedChapterName = chapterId ? chapters.find((c) => c.id === chapterId)?.title : "All Chapters";
+
+  function applyExamBody(nextExamBodyId: string) {
+    setExamBodyId(nextExamBodyId);
+    mergeScope({ examBodyId: nextExamBodyId || undefined, classId: undefined, subjectId: undefined, chapterId: undefined });
+  }
+
+  function applyClass(nextClassId: string) {
+    setClassId(nextClassId);
+    mergeScope({ examBodyId: examBodyId || undefined, classId: nextClassId || undefined, subjectId: undefined, chapterId: undefined });
+  }
+
+  function applySubject(nextSubjectId: string) {
+    setSubjectId(nextSubjectId);
+    mergeScope({ examBodyId: examBodyId || undefined, classId: classId || undefined, subjectId: nextSubjectId || undefined, chapterId: undefined });
+  }
+
+  function applyChapter(nextChapterId: string) {
+    setChapterId(nextChapterId);
+    mergeScope({
+      examBodyId: examBodyId || undefined,
+      classId: classId || undefined,
+      subjectId: subjectId || undefined,
+      chapterId: nextChapterId || undefined,
+    });
+  }
+
+  const filteredQuestions = useMemo(
+    () =>
+      questions.filter((q) => {
+        const matchesSearch = q.question_text.toLowerCase().includes(searchQuery.toLowerCase());
+        const matchesDifficulty = manageDifficulty === "all" || q.difficulty === manageDifficulty;
+        const matchesType = manageType === "all" || q.question_type === manageType;
+        const matchesBloom = manageBloom === "all" || (q.bloom_level || "") === manageBloom;
+        return matchesSearch && matchesDifficulty && matchesType && matchesBloom;
+      }),
+    [questions, searchQuery, manageDifficulty, manageType, manageBloom]
+  );
+
+  const visibleQuestionIds = useMemo(() => filteredQuestions.map((q) => q.id), [filteredQuestions]);
+  const allVisibleSelected = visibleQuestionIds.length > 0 && visibleQuestionIds.every((id) => selectedQuestionIds.includes(id));
+  const selectedVisibleCount = visibleQuestionIds.filter((id) => selectedQuestionIds.includes(id)).length;
+
+  function normalizeQuestionPrefix(value: string) {
+    return value.replace(/\s+/g, " ").trim().toLowerCase().slice(0, 50);
+  }
+
+  async function getChapterQuestionsForDuplicateCheck(targetChapterId: string) {
+    if (!profile?.school_id) return [] as Question[];
+    const cached = questions.filter((q) => q.chapter_id === targetChapterId);
+    if (cached.length > 0) return cached;
+    return getQuestions(profile.school_id, [targetChapterId]);
+  }
+
+  async function findDuplicateQuestion(targetChapterId: string, questionTextValue: string, excludeQuestionId?: string) {
+    const prefix = normalizeQuestionPrefix(questionTextValue);
+    if (!prefix) return null;
+    const pool = await getChapterQuestionsForDuplicateCheck(targetChapterId);
+    return pool.find((q) => q.id !== excludeQuestionId && normalizeQuestionPrefix(q.question_text) === prefix) || null;
+  }
+
+  function toggleQuestionSelection(questionId: string) {
+    setSelectedQuestionIds((prev) =>
+      prev.includes(questionId) ? prev.filter((id) => id !== questionId) : [...prev, questionId]
+    );
+  }
+
+  function toggleSelectAllVisible(checked: boolean) {
+    setSelectedQuestionIds((prev) => {
+      if (checked) {
+        return Array.from(new Set([...prev, ...visibleQuestionIds]));
+      }
+      return prev.filter((id) => !visibleQuestionIds.includes(id));
+    });
+  }
+
+  useEffect(() => {
+    setSelectedQuestionIds((prev) => prev.filter((id) => questions.some((q) => q.id === id)));
+  }, [questions]);
 
   useEffect(() => {
     if (questionType === "mcq") {
@@ -267,6 +387,12 @@ export function QuestionBankPage() {
     }
     if (questionType === "diagram" && !correct.trim()) {
       toast("error", "Correct answer / labeling key is required for diagram questions");
+      return;
+    }
+
+    const duplicate = await findDuplicateQuestion(chapterId, questionText);
+    if (duplicate) {
+      toast("error", "Duplicate question detected in this chapter (same first 50 characters)");
       return;
     }
 
@@ -502,7 +628,7 @@ export function QuestionBankPage() {
   async function handleClone(q: Question) {
     setQuestionType(q.question_type);
     setQuestionText(q.question_text);
-    setOptions((q as any).options || ["", "", "", ""]);
+    setOptions([q.option_a || "", q.option_b || "", q.option_c || "", q.option_d || ""]);
     setCorrect(q.correct_answer || "");
     setExplanation(q.explanation || "");
     setDiff(q.difficulty);
@@ -517,9 +643,127 @@ export function QuestionBankPage() {
   }
 
   function handleEdit(q: Question) {
-    // Similar to clone but maybe track ID for update
-    handleClone(q);
-    toast("success", "Editing existing question (will save as new if not careful)");
+    setEditingQuestion(q);
+    setEditDraft({
+      question_text: q.question_text || "",
+      option_a: q.option_a || "",
+      option_b: q.option_b || "",
+      option_c: q.option_c || "",
+      option_d: q.option_d || "",
+      correct_answer: q.correct_answer || "",
+      difficulty: q.difficulty,
+      bloom_level: q.bloom_level || "",
+      question_level: q.question_level,
+      explanation: q.explanation || "",
+      diagram_url: q.diagram_url || "",
+    });
+  }
+
+  async function saveEdit() {
+    if (!editingQuestion || !editDraft) return;
+    const nextText = editDraft.question_text.trim();
+    if (!nextText) {
+      toast("error", "Question text is required");
+      return;
+    }
+
+    if (editingQuestion.question_type === "mcq") {
+      if (!editDraft.option_a.trim() || !editDraft.option_b.trim() || !editDraft.option_c.trim() || !editDraft.option_d.trim()) {
+        toast("error", "MCQ requires Option A, B, C and D");
+        return;
+      }
+      if (!["A", "B", "C", "D"].includes(editDraft.correct_answer)) {
+        toast("error", "MCQ correct answer must be A/B/C/D");
+        return;
+      }
+    }
+
+    if (editingQuestion.question_type === "true_false" && !["True", "False"].includes(editDraft.correct_answer)) {
+      toast("error", "True/False correct answer must be True or False");
+      return;
+    }
+
+    if (["fill_blanks", "matching", "diagram"].includes(editingQuestion.question_type) && !editDraft.correct_answer.trim()) {
+      toast("error", "Correct answer is required for this question type");
+      return;
+    }
+
+    if (editingQuestion.question_type === "diagram" && !editDraft.diagram_url.trim()) {
+      toast("error", "Diagram URL is required for diagram questions");
+      return;
+    }
+
+    const duplicate = await findDuplicateQuestion(editingQuestion.chapter_id, nextText, editingQuestion.id);
+    if (duplicate) {
+      toast("error", "Duplicate question detected in this chapter (same first 50 characters)");
+      return;
+    }
+
+    setIsSavingEdit(true);
+    try {
+      await updateQuestionById(editingQuestion.id, {
+        question_text: nextText,
+        option_a: editingQuestion.question_type === "mcq" || editingQuestion.question_type === "true_false" ? editDraft.option_a.trim() || null : null,
+        option_b: editingQuestion.question_type === "mcq" || editingQuestion.question_type === "true_false" ? editDraft.option_b.trim() || null : null,
+        option_c: editingQuestion.question_type === "mcq" ? editDraft.option_c.trim() || null : null,
+        option_d: editingQuestion.question_type === "mcq" ? editDraft.option_d.trim() || null : null,
+        correct_answer: editDraft.correct_answer.trim() || null,
+        difficulty: editDraft.difficulty,
+        bloom_level: editDraft.bloom_level || undefined,
+        question_level: editDraft.question_level,
+        explanation: editDraft.explanation.trim() || null,
+        diagram_url: editingQuestion.question_type === "diagram" ? editDraft.diagram_url.trim() || null : null,
+      });
+      toast("success", "Question updated");
+      setEditingQuestion(null);
+      setEditDraft(null);
+      fetchQuestions();
+    } finally {
+      setIsSavingEdit(false);
+    }
+  }
+
+  function applyQuestionState(next: Question[]) {
+    setQuestions(next);
+    setRowsCount(next.length);
+  }
+
+  function prepareDeleteIntent(ids: string[], message: string) {
+    const snapshots = questions.filter((question) => ids.includes(question.id));
+    if (!snapshots.length) {
+      toast("error", "No matching questions found");
+      return;
+    }
+    setDeleteIntent({ ids, snapshots, message });
+  }
+
+  async function confirmDeleteIntent() {
+    if (!deleteIntent) return;
+    setIsDeletingQuestions(true);
+    const { ids, snapshots } = deleteIntent;
+    applyQuestionState(questions.filter((question) => !ids.includes(question.id)));
+    setSelectedQuestionIds((prev) => prev.filter((id) => !ids.includes(id)));
+    queueDelete({
+      label: ids.length > 1 ? `${ids.length} questions` : "Question",
+      commit: () => deleteQuestionsByIds(ids),
+      rollback: () => {
+        const restored = [...snapshots, ...questions.filter((question) => !snapshots.some((snap) => snap.id === question.id))]
+          .sort((a, b) => b.created_at.localeCompare(a.created_at));
+        applyQuestionState(restored);
+      },
+      successMessage: ids.length > 1 ? `${ids.length} questions deleted` : "Question deleted",
+      failureMessage: "Failed to delete question(s)",
+    });
+    setDeleteIntent(null);
+    setIsDeletingQuestions(false);
+  }
+
+  async function deleteSelectedQuestions() {
+    if (!selectedQuestionIds.length) {
+      toast("error", "No questions selected");
+      return;
+    }
+    prepareDeleteIntent(selectedQuestionIds, `Delete ${selectedQuestionIds.length} selected question(s)?`);
   }
   async function handleFileSelection(file: File) {
     if (!profile?.school_id || !chapterId) return;
@@ -560,28 +804,24 @@ export function QuestionBankPage() {
 
   function applyMapping() {
     const validated = rawUploadData.map((row, idx) => {
-      const mapped: any = {
-        question_text: row[columnMapping["question_text"]] || "",
-        correct_answer: row[columnMapping["correct_answer"]] || "",
-        difficulty: row[columnMapping["difficulty"]] || "medium",
-        bloom_level: row[columnMapping["bloom_level"]] || "",
-        question_level: row[columnMapping["question_level"]] || "exercise",
-        explanation: row[columnMapping["explanation"]] || "",
-        question_type: questionType,
-        school_id: profile?.school_id,
-        chapter_id: chapterId
+      const mappedRow: Record<string, unknown> = {
+        question_text: columnMapping["question_text"] ? row[columnMapping["question_text"]] : "",
+        correct_answer: columnMapping["correct_answer"] ? row[columnMapping["correct_answer"]] : "",
+        difficulty: columnMapping["difficulty"] ? row[columnMapping["difficulty"]] : "medium",
+        bloom_level: columnMapping["bloom_level"] ? row[columnMapping["bloom_level"]] : "",
+        question_level: columnMapping["question_level"] ? row[columnMapping["question_level"]] : "exercise",
+        explanation: columnMapping["explanation"] ? row[columnMapping["explanation"]] : "",
+        diagram_url: columnMapping["diagram_url"] ? row[columnMapping["diagram_url"]] : "",
       };
       if (questionType === "mcq") {
-        mapped.options = [
-          row[columnMapping["option_a"]] || "",
-          row[columnMapping["option_b"]] || "",
-          row[columnMapping["option_c"]] || "",
-          row[columnMapping["option_d"]] || ""
-        ];
+        mappedRow.option_a = columnMapping["option_a"] ? row[columnMapping["option_a"]] : "";
+        mappedRow.option_b = columnMapping["option_b"] ? row[columnMapping["option_b"]] : "";
+        mappedRow.option_c = columnMapping["option_c"] ? row[columnMapping["option_c"]] : "";
+        mappedRow.option_d = columnMapping["option_d"] ? row[columnMapping["option_d"]] : "";
       }
-      return { index: idx + 1, questionText: mapped.question_text, status: "valid", message: "Mapped", mapped };
+      return validateAndMapUploadRow(mappedRow, idx + 1);
     });
-    setUploadPreview(validated as any);
+    setUploadPreview(validated);
     setShowMapper(false);
     toast("success", `Mapped ${validated.length} questions successfully`);
   }
@@ -592,9 +832,30 @@ export function QuestionBankPage() {
       toast("error", "No valid rows to import");
       return;
     }
-    const inserted = await addQuestions(validRows);
+    const existing = chapterId ? await getChapterQuestionsForDuplicateCheck(chapterId) : [];
+    const seenPrefixes = new Set(existing.map((q) => normalizeQuestionPrefix(q.question_text)));
+    const uniqueRows: Omit<Question, "id" | "created_at">[] = [];
+    let skippedDuplicates = 0;
+
+    for (const row of validRows) {
+      const prefix = normalizeQuestionPrefix(row.question_text || "");
+      if (!prefix) continue;
+      if (seenPrefixes.has(prefix)) {
+        skippedDuplicates += 1;
+        continue;
+      }
+      seenPrefixes.add(prefix);
+      uniqueRows.push(row);
+    }
+
+    if (!uniqueRows.length) {
+      toast("error", "All rows were duplicates based on the first 50 characters");
+      return;
+    }
+
+    const inserted = await addQuestions(uniqueRows);
     setLastImportIds(inserted.map((q) => q.id));
-    toast("success", `${inserted.length} questions imported`);
+    toast("success", skippedDuplicates ? `${inserted.length} questions imported, ${skippedDuplicates} duplicates skipped` : `${inserted.length} questions imported`);
     setUploadFileName("");
     setUploadPreview([]);
     fetchQuestions();
@@ -685,9 +946,30 @@ export function QuestionBankPage() {
       return;
     }
 
-    const inserted = await addQuestions(payload);
+    const existing = chapterId ? await getChapterQuestionsForDuplicateCheck(chapterId) : [];
+    const seenPrefixes = new Set(existing.map((q) => normalizeQuestionPrefix(q.question_text)));
+    const uniquePayload: Omit<Question, "id" | "created_at">[] = [];
+    let skippedDuplicates = 0;
+
+    for (const row of payload) {
+      const prefix = normalizeQuestionPrefix(row.question_text || "");
+      if (!prefix) continue;
+      if (seenPrefixes.has(prefix)) {
+        skippedDuplicates += 1;
+        continue;
+      }
+      seenPrefixes.add(prefix);
+      uniquePayload.push(row);
+    }
+
+    if (!uniquePayload.length) {
+      toast("error", "All AI questions were duplicates based on the first 50 characters");
+      return;
+    }
+
+    const inserted = await addQuestions(uniquePayload);
     setLastImportIds(inserted.map((q) => q.id));
-    toast("success", `${inserted.length} AI questions saved`);
+    toast("success", skippedDuplicates ? `${inserted.length} AI questions saved, ${skippedDuplicates} duplicates skipped` : `${inserted.length} AI questions saved`);
     setAiGenerated([]);
     fetchQuestions();
   }
@@ -714,6 +996,54 @@ export function QuestionBankPage() {
           </button>
         </div>
       </div>
+      <ContextBreadcrumbs
+        items={[
+          {
+            label: "Exam Body",
+            value: selectedExamBodyName || "All Exam Bodies",
+            selected: !!examBodyId,
+            count: examBodies.length,
+            onSelect: () => navigate({ pathname: "/exam-bodies", search: hierarchyScopeToSearch(scopeToLevel("examBodyId")) }),
+            onClear: () => {
+              setExamBodyId("");
+              clearFrom("examBodyId");
+            },
+          },
+          {
+            label: "Class",
+            value: selectedClassName || "All Classes",
+            selected: !!classId,
+            count: classes.length,
+            onSelect: () => navigate({ pathname: "/classes", search: hierarchyScopeToSearch(scopeToLevel("classId")) }),
+            onClear: () => {
+              setClassId("");
+              clearFrom("classId");
+            },
+          },
+          {
+            label: "Subject",
+            value: selectedSubjectName || "All Subjects",
+            selected: !!subjectId,
+            count: visibleSubjects.length,
+            onSelect: () => navigate({ pathname: "/subjects", search: hierarchyScopeToSearch(scopeToLevel("subjectId")) }),
+            onClear: () => {
+              setSubjectId("");
+              clearFrom("subjectId");
+            },
+          },
+          {
+            label: "Chapter",
+            value: selectedChapterName || "All Chapters",
+            selected: !!chapterId,
+            count: visibleChapters.length,
+            onSelect: () => navigate({ pathname: "/chapters", search: hierarchyScopeToSearch(scopeToLevel("chapterId")) }),
+            onClear: () => {
+              setChapterId("");
+              clearFrom("chapterId");
+            },
+          },
+        ]}
+      />
 
       {viewMode === "manage" ? (
         <>
@@ -724,22 +1054,25 @@ export function QuestionBankPage() {
             </div>
             <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-4">
               <label className="text-xs font-semibold text-slate-600">Exam Body
-                <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={examBodyId} onChange={(e) => setExamBodyId(e.target.value)}>
+                <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={examBodyId} onChange={(e) => applyExamBody(e.target.value)}>
+                  <option value="">All Exam Bodies</option>
                   {examBodies.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
                 </select>
               </label>
               <label className="text-xs font-semibold text-slate-600">Class
-                <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={classId} onChange={(e) => setClassId(e.target.value)}>
+                <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={classId} onChange={(e) => applyClass(e.target.value)}>
+                  <option value="">All Classes</option>
                   {classes.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
               </label>
               <label className="text-xs font-semibold text-slate-600">Subject
-                <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={subjectId} onChange={(e) => setSubjectId(e.target.value)}>
+                <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={subjectId} onChange={(e) => applySubject(e.target.value)}>
+                  <option value="">All Subjects</option>
                   {visibleSubjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                 </select>
               </label>
               <label className="text-xs font-semibold text-slate-600">Chapter
-                <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={chapterId} onChange={(e) => setChapterId(e.target.value)}>
+                <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={chapterId} onChange={(e) => applyChapter(e.target.value)}>
                   <option value="">All Chapters</option>
                   {visibleChapters.map((c) => <option key={c.id} value={c.id}>{c.title}</option>)}
                 </select>
@@ -748,51 +1081,175 @@ export function QuestionBankPage() {
           </div>
 
           <div className="space-y-4">
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                placeholder="Search questions by text..."
-                className="flex-1 rounded-lg border border-slate-300 px-4 py-2 text-sm"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-              />
+            <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
+              <label className="block text-xs font-semibold text-slate-600">
+                Search Questions
+                <input
+                  type="text"
+                  placeholder="Search questions by text..."
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-4 py-2 text-sm"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                />
+              </label>
+
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="space-y-1">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Difficulty</p>
+                  <div className="flex flex-wrap gap-2">
+                    {(["all", ...difficultyLevels] as const).map((value) => (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => setManageDifficulty(value)}
+                        className={`rounded-full px-3 py-1 text-xs font-bold capitalize ${manageDifficulty === value ? "bg-brand text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
+                      >
+                        {value}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Question Type</p>
+                  <div className="flex flex-wrap gap-2">
+                    {(["all", ...questionTypes] as const).map((value) => (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => setManageType(value)}
+                        className={`rounded-full px-3 py-1 text-xs font-bold capitalize ${manageType === value ? "bg-brand text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
+                      >
+                        {value.replace("_", " ")}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Bloom Level</p>
+                  <div className="flex flex-wrap gap-2">
+                    {(["all", ...blooms] as const).map((value) => (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => setManageBloom(value)}
+                        className={`rounded-full px-3 py-1 text-xs font-bold capitalize ${manageBloom === value ? "bg-brand text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
+                      >
+                        {value}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
             </div>
-            <AdminTable
-              data={questions.filter(q => q.question_text.toLowerCase().includes(searchQuery.toLowerCase()))}
-              keyExtractor={(q) => q.id}
-              columns={[
-                {
-                  header: "Type",
-                  className: "w-24 capitalize",
-                  render: (q) => q.question_type.replace("_", " ")
-                },
-                {
-                  header: "Question",
-                  render: (q) => (
-                    <div className="max-w-md">
-                      <p className="line-clamp-2">{q.question_text}</p>
-                      <div className="mt-1 flex gap-2">
-                        <span className={`rounded px-1.5 py-0.5 text-[10px] uppercase font-bold ${q.difficulty === "hard" ? "bg-red-100 text-red-700" : q.difficulty === "medium" ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>
-                          {q.difficulty}
+
+            {selectedQuestionIds.length > 0 && (
+              <div className="flex items-center justify-between rounded-xl border border-red-200 bg-red-50 px-4 py-2">
+                <p className="text-xs font-semibold text-red-700">{selectedQuestionIds.length} selected</p>
+                <button
+                  type="button"
+                  onClick={deleteSelectedQuestions}
+                  className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-red-700"
+                >
+                  Delete Selected
+                </button>
+              </div>
+            )}
+
+            <div className="overflow-x-auto overflow-y-visible rounded-xl border border-slate-200 bg-white">
+              <table className="min-w-full text-sm">
+                <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
+                  <tr>
+                    <th className="w-10 px-3 py-3">
+                      <input
+                        type="checkbox"
+                        checked={allVisibleSelected}
+                        onChange={(e) => toggleSelectAllVisible(e.target.checked)}
+                        aria-label="Select all visible questions"
+                      />
+                    </th>
+                    <th className="w-36 px-3 py-3">Type</th>
+                    <th className="px-3 py-3">Question</th>
+                    <th className="w-40 px-3 py-3">Metadata</th>
+                    <th className="w-48 px-3 py-3">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {loadingQuestions && (
+                    <tr>
+                      <td colSpan={5} className="px-4 py-8 text-center text-sm text-slate-500">Loading questions...</td>
+                    </tr>
+                  )}
+
+                  {!loadingQuestions && filteredQuestions.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="px-4 py-4">
+                        <EmptyState title="No questions found" description="Try another filter or add new questions in this chapter." />
+                      </td>
+                    </tr>
+                  )}
+
+                  {!loadingQuestions && filteredQuestions.map((q) => (
+                    <tr key={q.id} className="border-t border-slate-100 align-top hover:bg-slate-50/70">
+                      <td className="px-3 py-3">
+                        <input
+                          type="checkbox"
+                          checked={selectedQuestionIds.includes(q.id)}
+                          onChange={() => toggleQuestionSelection(q.id)}
+                          aria-label={`Select question ${q.id}`}
+                        />
+                      </td>
+                      <td className="px-3 py-3">
+                        <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold uppercase text-slate-700">
+                          {q.question_type.replace("_", " ")}
                         </span>
-                        <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] uppercase font-bold text-slate-600">
-                          {q.bloom_level}
-                        </span>
-                      </div>
-                    </div>
-                  )
-                }
-              ]}
-              onEdit={handleEdit}
-              onClone={handleClone}
-              onDelete={async (q) => {
-                if (window.confirm("Delete this question?")) {
-                  await deleteQuestionsByIds([q.id]);
-                  toast("success", "Question deleted");
-                  fetchQuestions();
-                }
-              }}
-            />
+                      </td>
+                      <td className="px-3 py-3">
+                        <div className="group relative max-w-2xl">
+                          <p className="line-clamp-2 text-slate-800">{q.question_text}</p>
+                          <div className="pointer-events-none absolute left-0 top-full z-20 mt-2 hidden w-[30rem] rounded-xl border border-slate-200 bg-white p-3 text-xs shadow-2xl group-hover:block">
+                            <p className="font-semibold text-slate-800">{q.question_text}</p>
+                            <div className="mt-2 space-y-1 text-slate-600">
+                              <p><span className="font-bold text-slate-700">Answer:</span> {q.correct_answer || "--"}</p>
+                              <p><span className="font-bold text-slate-700">Difficulty:</span> {q.difficulty}</p>
+                              <p><span className="font-bold text-slate-700">Bloom:</span> {q.bloom_level || "--"}</p>
+                              <p><span className="font-bold text-slate-700">Level:</span> {q.question_level}</p>
+                            </div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-3 py-3">
+                        <div className="space-y-1">
+                          <span className={`inline-flex rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${q.difficulty === "hard" ? "bg-red-100 text-red-700" : q.difficulty === "medium" ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>
+                            {q.difficulty}
+                          </span>
+                          <p className="text-[10px] font-semibold uppercase text-slate-500">{q.bloom_level || "no bloom"}</p>
+                        </div>
+                      </td>
+                      <td className="px-3 py-3">
+                        <div className="flex flex-wrap gap-2">
+                          <button type="button" onClick={() => handleEdit(q)} className="rounded-lg border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">Edit</button>
+                          <button type="button" onClick={() => handleClone(q)} className="rounded-lg border border-brand/40 px-2 py-1 text-xs font-semibold text-brand hover:bg-brand/10">Clone</button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              prepareDeleteIntent([q.id], "Delete this question?");
+                            }}
+                            className="rounded-lg border border-red-300 px-2 py-1 text-xs font-semibold text-red-700 hover:bg-red-50"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {selectedVisibleCount > 0 && (
+              <p className="text-xs text-slate-500">{selectedVisibleCount} visible row(s) currently selected.</p>
+            )}
           </div>
         </>
       ) : (
@@ -823,25 +1280,28 @@ export function QuestionBankPage() {
               <div className="grid gap-4 md:grid-cols-2">
                 <label className="space-y-1">
                   <span className="text-xs font-bold uppercase text-slate-500">Exam Body</span>
-                  <select className="flex h-12 w-full items-center rounded-xl border border-slate-300 bg-slate-50 px-4 text-sm font-medium focus:border-brand focus:ring-1 focus:ring-brand" value={examBodyId} onChange={(e) => setExamBodyId(e.target.value)}>
+                  <select className="flex h-12 w-full items-center rounded-xl border border-slate-300 bg-slate-50 px-4 text-sm font-medium focus:border-brand focus:ring-1 focus:ring-brand" value={examBodyId} onChange={(e) => applyExamBody(e.target.value)}>
+                    <option value="">All Exam Bodies</option>
                     {examBodies.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
                   </select>
                 </label>
                 <label className="space-y-1">
                   <span className="text-xs font-bold uppercase text-slate-500">Board Class</span>
-                  <select className="flex h-12 w-full items-center rounded-xl border border-slate-300 bg-slate-50 px-4 text-sm font-medium focus:border-brand focus:ring-1 focus:ring-brand" value={classId} onChange={(e) => setClassId(e.target.value)}>
+                  <select className="flex h-12 w-full items-center rounded-xl border border-slate-300 bg-slate-50 px-4 text-sm font-medium focus:border-brand focus:ring-1 focus:ring-brand" value={classId} onChange={(e) => applyClass(e.target.value)}>
+                    <option value="">All Classes</option>
                     {classes.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                   </select>
                 </label>
                 <label className="space-y-1">
                   <span className="text-xs font-bold uppercase text-slate-500">Subject</span>
-                  <select className="flex h-12 w-full items-center rounded-xl border border-slate-300 bg-slate-50 px-4 text-sm font-medium focus:border-brand focus:ring-1 focus:ring-brand" value={subjectId} onChange={(e) => setSubjectId(e.target.value)}>
+                  <select className="flex h-12 w-full items-center rounded-xl border border-slate-300 bg-slate-50 px-4 text-sm font-medium focus:border-brand focus:ring-1 focus:ring-brand" value={subjectId} onChange={(e) => applySubject(e.target.value)}>
+                    <option value="">All Subjects</option>
                     {visibleSubjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                   </select>
                 </label>
                 <label className="space-y-1">
                   <span className="text-xs font-bold uppercase text-slate-500">Specific Chapter</span>
-                  <select className="flex h-12 w-full items-center rounded-xl border border-slate-300 bg-slate-50 px-4 text-sm font-medium focus:border-brand focus:ring-1 focus:ring-brand" value={chapterId} onChange={(e) => setChapterId(e.target.value)}>
+                  <select className="flex h-12 w-full items-center rounded-xl border border-slate-300 bg-slate-50 px-4 text-sm font-medium focus:border-brand focus:ring-1 focus:ring-brand" value={chapterId} onChange={(e) => applyChapter(e.target.value)}>
                     <option value="">-- Choose Chapter --</option>
                     {visibleChapters.map((c) => <option key={c.id} value={c.id}>{c.title}</option>)}
                   </select>
@@ -1249,6 +1709,181 @@ export function QuestionBankPage() {
               )}
             </div>
           )}
+        </div>
+      )}
+
+      <ConfirmModal
+        open={!!deleteIntent}
+        title="Confirm Delete"
+        message={deleteIntent?.message || ""}
+        confirmLabel="Delete"
+        loading={isDeletingQuestions}
+        onCancel={() => setDeleteIntent(null)}
+        onConfirm={confirmDeleteIntent}
+      />
+
+      {editingQuestion && editDraft && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
+          <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-2xl bg-white p-6 shadow-2xl">
+            <div className="mb-4 flex items-start justify-between">
+              <div>
+                <h3 className="font-display text-xl font-bold text-slate-900">Edit Question</h3>
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Type: {editingQuestion.question_type.replace("_", " ")}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingQuestion(null);
+                  setEditDraft(null);
+                }}
+                className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-100"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <label className="block text-xs font-semibold text-slate-600">
+                Question Text
+                <textarea
+                  rows={4}
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  value={editDraft.question_text}
+                  onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, question_text: e.target.value } : prev))}
+                />
+              </label>
+
+              {editingQuestion.question_type === "mcq" && (
+                <div className="grid gap-3 md:grid-cols-2">
+                  <label className="text-xs font-semibold text-slate-600">Option A
+                    <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={editDraft.option_a} onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, option_a: e.target.value } : prev))} />
+                  </label>
+                  <label className="text-xs font-semibold text-slate-600">Option B
+                    <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={editDraft.option_b} onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, option_b: e.target.value } : prev))} />
+                  </label>
+                  <label className="text-xs font-semibold text-slate-600">Option C
+                    <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={editDraft.option_c} onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, option_c: e.target.value } : prev))} />
+                  </label>
+                  <label className="text-xs font-semibold text-slate-600">Option D
+                    <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={editDraft.option_d} onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, option_d: e.target.value } : prev))} />
+                  </label>
+                </div>
+              )}
+
+              {editingQuestion.question_type === "true_false" && (
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                  True/False options are fixed as Option A = True and Option B = False.
+                </div>
+              )}
+
+              {editingQuestion.question_type === "diagram" && (
+                <label className="block text-xs font-semibold text-slate-600">
+                  Diagram URL
+                  <input
+                    className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                    value={editDraft.diagram_url}
+                    onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, diagram_url: e.target.value } : prev))}
+                  />
+                </label>
+              )}
+
+              <div className="grid gap-3 md:grid-cols-2">
+                <label className="text-xs font-semibold text-slate-600">
+                  Correct Answer
+                  {editingQuestion.question_type === "mcq" ? (
+                    <select
+                      className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                      value={editDraft.correct_answer}
+                      onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, correct_answer: e.target.value } : prev))}
+                    >
+                      {["A", "B", "C", "D"].map((choice) => <option key={choice} value={choice}>{choice}</option>)}
+                    </select>
+                  ) : editingQuestion.question_type === "true_false" ? (
+                    <select
+                      className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                      value={editDraft.correct_answer}
+                      onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, correct_answer: e.target.value } : prev))}
+                    >
+                      {["True", "False"].map((choice) => <option key={choice} value={choice}>{choice}</option>)}
+                    </select>
+                  ) : (
+                    <input
+                      className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                      value={editDraft.correct_answer}
+                      onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, correct_answer: e.target.value } : prev))}
+                    />
+                  )}
+                </label>
+
+                <label className="text-xs font-semibold text-slate-600">
+                  Difficulty
+                  <select
+                    className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                    value={editDraft.difficulty}
+                    onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, difficulty: e.target.value as Difficulty } : prev))}
+                  >
+                    {difficultyLevels.map((d) => <option key={d} value={d}>{d}</option>)}
+                  </select>
+                </label>
+
+                <label className="text-xs font-semibold text-slate-600">
+                  Bloom Level
+                  <select
+                    className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                    value={editDraft.bloom_level}
+                    onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, bloom_level: e.target.value as BloomLevel | "" } : prev))}
+                  >
+                    <option value="">-- None --</option>
+                    {blooms.map((b) => <option key={b} value={b}>{b}</option>)}
+                  </select>
+                </label>
+
+                <label className="text-xs font-semibold text-slate-600">
+                  Question Level
+                  <select
+                    className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                    value={editDraft.question_level}
+                    onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, question_level: e.target.value as QuestionLevel } : prev))}
+                  >
+                    {questionLevels.map((lvl) => <option key={lvl.id} value={lvl.id}>{lvl.label}</option>)}
+                  </select>
+                </label>
+              </div>
+
+              <label className="block text-xs font-semibold text-slate-600">
+                Explanation / Rubric Hint
+                <textarea
+                  rows={3}
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  value={editDraft.explanation}
+                  onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, explanation: e.target.value } : prev))}
+                />
+              </label>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingQuestion(null);
+                    setEditDraft(null);
+                  }}
+                  className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={saveEdit}
+                  disabled={isSavingEdit}
+                  className="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                >
+                  {isSavingEdit ? "Saving..." : "Save Changes"}
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>

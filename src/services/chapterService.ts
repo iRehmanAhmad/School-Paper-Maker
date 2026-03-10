@@ -118,6 +118,63 @@ export async function updateChapter(chapterId: string, input: Pick<ChapterEntity
     return row;
 }
 
+export async function reorderChapters(subjectId: string, orderedChapterIds: string[]) {
+    if (!orderedChapterIds.length) {
+        return;
+    }
+
+    if (hasSupabase && supabase) {
+        const client = supabase;
+        const existing = await getChapters([subjectId]);
+        const existingIds = existing.map((c) => c.id);
+        if (existingIds.length !== orderedChapterIds.length) {
+            throw new Error("Reorder list is incomplete");
+        }
+        const sameSet = existingIds.every((id) => orderedChapterIds.includes(id));
+        if (!sameSet) {
+            throw new Error("Reorder list has invalid chapter IDs");
+        }
+
+        const offset = 1000;
+        const tempResults = await Promise.all(
+            orderedChapterIds.map((id, idx) =>
+                client.from("chapters").update({ chapter_number: idx + 1 + offset }).eq("id", id)
+            )
+        );
+        const tempError = tempResults.find((res) => res.error)?.error;
+        if (tempError) {
+            throw tempError;
+        }
+
+        const finalResults = await Promise.all(
+            orderedChapterIds.map((id, idx) =>
+                client.from("chapters").update({ chapter_number: idx + 1 }).eq("id", id)
+            )
+        );
+        const finalError = finalResults.find((res) => res.error)?.error;
+        if (finalError) {
+            throw finalError;
+        }
+        return;
+    }
+
+    const rows = readLocal<ChapterEntity>(DB.chapters);
+    const subjectRows = rows.filter((r) => r.subject_id === subjectId);
+    const subjectIds = subjectRows.map((c) => c.id);
+    if (subjectIds.length !== orderedChapterIds.length || !subjectIds.every((id) => orderedChapterIds.includes(id))) {
+        throw new Error("Reorder list is invalid");
+    }
+
+    const nextNumberById = new Map<string, number>();
+    orderedChapterIds.forEach((id, idx) => nextNumberById.set(id, idx + 1));
+    const updated = rows.map((row) =>
+        row.subject_id === subjectId && nextNumberById.has(row.id)
+            ? { ...row, chapter_number: nextNumberById.get(row.id)! }
+            : row
+    );
+    writeLocal(DB.chapters, updated);
+}
+
 export async function deleteChapter(chapterId: string) {
     if (hasSupabase && supabase) {
         const { error } = await supabase.from("chapters").delete().eq("id", chapterId);

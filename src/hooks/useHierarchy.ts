@@ -1,118 +1,173 @@
 import { useEffect, useMemo, useState } from "react";
-import { getClasses, getExamBodies, getSubjects, getChapters } from "@/services/repositories";
+import { getChapters, getClasses, getExamBodies, getSubjects } from "@/services/repositories";
 import type { ChapterEntity, ClassEntity, ExamBody, SubjectEntity } from "@/types/domain";
+import type { HierarchyScope } from "@/utils/hierarchyScope";
 
-export function useHierarchy(schoolId: string | null | undefined) {
-    const [examBodies, setExamBodies] = useState<ExamBody[]>([]);
-    const [classes, setClasses] = useState<ClassEntity[]>([]);
-    const [subjects, setSubjects] = useState<SubjectEntity[]>([]);
-    const [chapters, setChapters] = useState<ChapterEntity[]>([]);
+type UseHierarchyOptions = {
+  initialScope?: HierarchyScope;
+  autoSelectFirst?: boolean;
+};
 
-    const [examBodyId, setExamBodyId] = useState("");
-    const [classId, setClassId] = useState("");
-    const [subjectId, setSubjectId] = useState("");
-    const [chapterId, setChapterId] = useState("");
-
-    const [loading, setLoading] = useState(false);
-
-    // Load Exam Bodies
-    useEffect(() => {
-        if (!schoolId) return;
-        setLoading(true);
-        getExamBodies(schoolId).then((data) => {
-            setExamBodies(data);
-            if (data.length > 0 && !examBodyId) {
-                setExamBodyId(data[0].id);
-            }
-            setLoading(false);
-        });
-    }, [schoolId]);
-
-    // Load Classes when Exam Body changes
-    useEffect(() => {
-        if (!schoolId || !examBodyId) {
-            setClasses([]);
-            return;
-        }
-        getClasses(schoolId, examBodyId).then((data) => {
-            setClasses(data);
-            if (data.length > 0) {
-                if (!classId || !data.some(c => c.id === classId)) {
-                    setClassId(data[0].id);
-                }
-            } else {
-                setClassId("");
-            }
-        });
-    }, [schoolId, examBodyId]);
-
-    // Load Subjects when Classes change
-    useEffect(() => {
-        if (classes.length === 0) {
-            setSubjects([]);
-            return;
-        }
-        getSubjects(classes.map((c) => c.id)).then((data) => {
-            setSubjects(data);
-        });
-    }, [classes]);
-
-    // Load Chapters when Subjects change
-    useEffect(() => {
-        if (subjects.length === 0) {
-            setChapters([]);
-            return;
-        }
-        getChapters(subjects.map((s) => s.id)).then((data) => {
-            setChapters(data);
-        });
-    }, [subjects]);
-
-    const visibleSubjects = useMemo(() =>
-        subjects.filter((s) => !classId || s.class_id === classId),
-        [subjects, classId]
-    );
-
-    const visibleChapters = useMemo(() =>
-        chapters.filter((c) => !subjectId || c.subject_id === subjectId),
-        [chapters, subjectId]
-    );
-
-    // Sync Subject selection
-    useEffect(() => {
-        if (visibleSubjects.length > 0) {
-            if (!subjectId || !visibleSubjects.some(s => s.id === subjectId)) {
-                setSubjectId(visibleSubjects[0].id);
-            }
-        } else {
-            setSubjectId("");
-        }
-    }, [visibleSubjects, classId]);
-
-    // Sync Chapter selection
-    useEffect(() => {
-        if (visibleChapters.length > 0) {
-            if (!chapterId || !visibleChapters.some(c => c.id === chapterId)) {
-                setChapterId(visibleChapters[0].id);
-            }
-        } else {
-            setChapterId("");
-        }
-    }, [visibleChapters, subjectId]);
-
-    return {
-        examBodies,
-        classes,
-        subjects: visibleSubjects,
-        chapters: visibleChapters,
-        examBodyId,
-        setExamBodyId,
-        classId,
-        setClassId,
-        subjectId,
-        setSubjectId,
-        chapterId,
-        setChapterId,
-        loading
-    };
+function isSameId(a: string, b?: string) {
+  return a === (b || "");
 }
+
+export function useHierarchy(schoolId: string | null | undefined, options?: UseHierarchyOptions) {
+  const autoSelectFirst = options?.autoSelectFirst ?? true;
+
+  const [examBodies, setExamBodies] = useState<ExamBody[]>([]);
+  const [classes, setClasses] = useState<ClassEntity[]>([]);
+  const [subjects, setSubjects] = useState<SubjectEntity[]>([]);
+  const [chapters, setChapters] = useState<ChapterEntity[]>([]);
+
+  const [examBodyId, setExamBodyIdState] = useState(options?.initialScope?.examBodyId || "");
+  const [classId, setClassIdState] = useState(options?.initialScope?.classId || "");
+  const [subjectId, setSubjectIdState] = useState(options?.initialScope?.subjectId || "");
+  const [chapterId, setChapterIdState] = useState(options?.initialScope?.chapterId || "");
+
+  const [loading, setLoading] = useState(false);
+
+  // Sync internal selection from external scope (URL params)
+  useEffect(() => {
+    const nextExamBodyId = options?.initialScope?.examBodyId || "";
+    const nextClassId = options?.initialScope?.classId || "";
+    const nextSubjectId = options?.initialScope?.subjectId || "";
+    const nextChapterId = options?.initialScope?.chapterId || "";
+
+    setExamBodyIdState((prev) => (isSameId(prev, nextExamBodyId) ? prev : nextExamBodyId));
+    setClassIdState((prev) => (isSameId(prev, nextClassId) ? prev : nextClassId));
+    setSubjectIdState((prev) => (isSameId(prev, nextSubjectId) ? prev : nextSubjectId));
+    setChapterIdState((prev) => (isSameId(prev, nextChapterId) ? prev : nextChapterId));
+  }, [options?.initialScope?.examBodyId, options?.initialScope?.classId, options?.initialScope?.subjectId, options?.initialScope?.chapterId]);
+
+  const setExamBodyId = (nextExamBodyId: string) => {
+    setExamBodyIdState(nextExamBodyId);
+    setClassIdState("");
+    setSubjectIdState("");
+    setChapterIdState("");
+  };
+
+  const setClassId = (nextClassId: string) => {
+    setClassIdState(nextClassId);
+    setSubjectIdState("");
+    setChapterIdState("");
+  };
+
+  const setSubjectId = (nextSubjectId: string) => {
+    setSubjectIdState(nextSubjectId);
+    setChapterIdState("");
+  };
+
+  const setChapterId = (nextChapterId: string) => {
+    setChapterIdState(nextChapterId);
+  };
+
+  // Load Exam Bodies
+  useEffect(() => {
+    if (!schoolId) return;
+    setLoading(true);
+    getExamBodies(schoolId)
+      .then((data) => {
+        setExamBodies(data);
+        if (data.length === 0) {
+          setExamBodyIdState("");
+          return;
+        }
+        if (examBodyId && data.some((body) => body.id === examBodyId)) {
+          return;
+        }
+        if (autoSelectFirst) {
+          setExamBodyIdState(data[0].id);
+        } else {
+          setExamBodyIdState("");
+        }
+      })
+      .finally(() => setLoading(false));
+  }, [schoolId]);
+
+  // Load Classes when Exam Body changes. Empty exam body means all classes in school.
+  useEffect(() => {
+    if (!schoolId) {
+      setClasses([]);
+      return;
+    }
+    getClasses(schoolId, examBodyId || undefined).then((data) => {
+      setClasses(data);
+      if (!classId) {
+        if (autoSelectFirst && data.length > 0) {
+          setClassIdState(data[0].id);
+        }
+        return;
+      }
+      if (!data.some((row) => row.id === classId)) {
+        setClassIdState(autoSelectFirst && data.length > 0 ? data[0].id : "");
+      }
+    });
+  }, [schoolId, examBodyId]);
+
+  // Load Subjects when Classes change.
+  useEffect(() => {
+    if (classes.length === 0) {
+      setSubjects([]);
+      return;
+    }
+    getSubjects(classes.map((item) => item.id)).then((data) => {
+      setSubjects(data);
+    });
+  }, [classes]);
+
+  // Load Chapters when Subjects change.
+  useEffect(() => {
+    if (subjects.length === 0) {
+      setChapters([]);
+      return;
+    }
+    getChapters(subjects.map((item) => item.id)).then((data) => {
+      setChapters(data);
+    });
+  }, [subjects]);
+
+  const visibleSubjects = useMemo(() => subjects.filter((item) => !classId || item.class_id === classId), [subjects, classId]);
+  const visibleChapters = useMemo(() => chapters.filter((item) => !subjectId || item.subject_id === subjectId), [chapters, subjectId]);
+
+  // Sync subject selection with visible scope.
+  useEffect(() => {
+    if (visibleSubjects.length === 0) {
+      setSubjectIdState("");
+      return;
+    }
+    if (subjectId && visibleSubjects.some((item) => item.id === subjectId)) {
+      return;
+    }
+    setSubjectIdState(autoSelectFirst ? visibleSubjects[0].id : "");
+  }, [visibleSubjects, classId]);
+
+  // Sync chapter selection with visible scope.
+  useEffect(() => {
+    if (visibleChapters.length === 0) {
+      setChapterIdState("");
+      return;
+    }
+    if (chapterId && visibleChapters.some((item) => item.id === chapterId)) {
+      return;
+    }
+    setChapterIdState(autoSelectFirst ? visibleChapters[0].id : "");
+  }, [visibleChapters, subjectId]);
+
+  return {
+    examBodies,
+    classes,
+    subjects: visibleSubjects,
+    chapters: visibleChapters,
+    examBodyId,
+    setExamBodyId,
+    classId,
+    setClassId,
+    subjectId,
+    setSubjectId,
+    chapterId,
+    setChapterId,
+    loading,
+  };
+}
+

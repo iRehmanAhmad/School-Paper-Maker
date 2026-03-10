@@ -34,6 +34,73 @@ export async function addQuestions(rows: Omit<Question, "id" | "created_at">[]) 
     return mapped;
 }
 
+export async function getQuestionCountsByChapter(schoolId: string, chapterIds: string[]) {
+    ensureSeed();
+    if (!chapterIds.length) {
+        return {} as Record<string, number>;
+    }
+
+    if (hasSupabase && supabase) {
+        const counts: Record<string, number> = {};
+        const pageSize = 1000;
+        let from = 0;
+
+        while (true) {
+            const { data, error } = await supabase
+                .from("questions")
+                .select("chapter_id")
+                .eq("school_id", schoolId)
+                .in("chapter_id", chapterIds)
+                .range(from, from + pageSize - 1);
+            if (error) {
+                throw error;
+            }
+            const rows = (data ?? []) as Array<Pick<Question, "chapter_id">>;
+            for (const row of rows) {
+                counts[row.chapter_id] = (counts[row.chapter_id] ?? 0) + 1;
+            }
+            if (rows.length < pageSize) {
+                break;
+            }
+            from += pageSize;
+        }
+        return counts;
+    }
+
+    const counts: Record<string, number> = {};
+    for (const row of readLocal<Question>(DB.questions)) {
+        if (row.school_id !== schoolId || !chapterIds.includes(row.chapter_id)) {
+            continue;
+        }
+        counts[row.chapter_id] = (counts[row.chapter_id] ?? 0) + 1;
+    }
+    return counts;
+}
+
+export async function updateQuestionById(questionId: string, patch: Partial<Omit<Question, "id" | "created_at">>) {
+    if (hasSupabase && supabase) {
+        const { data, error } = await supabase
+            .from("questions")
+            .update(patch)
+            .eq("id", questionId)
+            .select("*")
+            .single();
+        if (error) {
+            throw error;
+        }
+        return data as Question;
+    }
+
+    const existing = readLocal<Question>(DB.questions);
+    const target = existing.find((q) => q.id === questionId);
+    if (!target) {
+        throw new Error("Question not found");
+    }
+    const updated = { ...target, ...patch };
+    writeLocal(DB.questions, existing.map((q) => (q.id === questionId ? updated : q)));
+    return updated;
+}
+
 export async function deleteQuestionsByIds(questionIds: string[]) {
     if (!questionIds.length) {
         return;

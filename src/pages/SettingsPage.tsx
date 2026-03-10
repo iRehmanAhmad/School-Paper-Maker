@@ -10,6 +10,26 @@ export function SettingsPage() {
   const [ai, setAi] = useState(getAISettings());
   const [appSettings, setAppSettings] = useState(getAppSettings());
 
+  const applyThemePreview = (theme: "light" | "dark" | "system") => {
+    const root = window.document.documentElement;
+    root.classList.remove("light", "dark");
+    const resolved = theme === "system"
+      ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+      : theme;
+    root.classList.add(resolved);
+    root.style.colorScheme = resolved;
+  };
+
+  const updateTheme = (theme: "light" | "dark" | "system") => {
+    setAppSettings((prev) => {
+      const next = { ...prev, theme };
+      saveAppSettings(next);
+      applyThemePreview(theme);
+      window.dispatchEvent(new CustomEvent("app-settings-updated"));
+      return next;
+    });
+  };
+
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>, key: 'schoolLogo' | 'secondaryLogo') => {
     const file = e.target.files?.[0];
     if (file) {
@@ -152,7 +172,7 @@ export function SettingsPage() {
                 {(['light', 'dark', 'system'] as const).map((t) => (
                   <button
                     key={t}
-                    onClick={() => setAppSettings({ ...appSettings, theme: t })}
+                    onClick={() => updateTheme(t)}
                     className={`flex-1 flex flex-col items-center gap-1.5 py-3 rounded-lg transition-all ${appSettings.theme === t
                         ? 'bg-card text-brand shadow-sm ring-1 ring-slate-900/5'
                         : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'

@@ -38,13 +38,31 @@ function ToastHost() {
   return (
     <div className="fixed right-4 top-4 z-50 space-y-2">
       {toasts.map((t) => (
-        <button
+        <div
           key={t.id}
-          onClick={() => remove(t.id)}
-          className={`block rounded-lg px-3 py-2 text-sm text-white ${t.type === "success" ? "bg-emerald-600" : "bg-red-600"}`}
+          className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-white shadow-lg ${t.type === "success" ? "bg-emerald-600" : "bg-red-600"}`}
         >
-          {t.message}
-        </button>
+          <span>{t.message}</span>
+          {t.action && (
+            <button
+              type="button"
+              onClick={() => {
+                t.action?.onClick();
+                remove(t.id);
+              }}
+              className="rounded bg-white/20 px-2 py-1 text-[10px] font-bold uppercase tracking-wider hover:bg-white/30"
+            >
+              {t.action.label}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => remove(t.id)}
+            className="rounded bg-white/20 px-2 py-1 text-[10px] font-bold uppercase tracking-wider hover:bg-white/30"
+          >
+            Close
+          </button>
+        </div>
       ))}
     </div>
   );

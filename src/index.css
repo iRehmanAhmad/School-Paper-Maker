@@ -33,3 +33,65 @@ body {
   background-image: linear-gradient(to bottom, transparent calc(1.6rem - 1px), rgba(31, 42, 55, 0.18) 1px);
   background-size: 100% 1.6rem;
 }
+
+/* Dark mode utility normalization for screens that still use light-tailwind classes */
+.dark .bg-white {
+  background-color: #0f172a !important;
+}
+.dark .bg-white\/95 {
+  background-color: rgba(15, 23, 42, 0.95) !important;
+}
+.dark .bg-white\/80 {
+  background-color: rgba(15, 23, 42, 0.8) !important;
+}
+.dark .bg-slate-50,
+.dark .bg-slate-50\/50 {
+  background-color: #111827 !important;
+}
+.dark .bg-slate-100 {
+  background-color: #1f2937 !important;
+}
+.dark .bg-slate-200,
+.dark .bg-slate-200\/50 {
+  background-color: #334155 !important;
+}
+.dark .bg-slate-300 {
+  background-color: #475569 !important;
+}
+.dark .bg-slate-400 {
+  background-color: #64748b !important;
+}
+
+.dark .text-slate-900,
+.dark .text-slate-800,
+.dark .text-slate-700 {
+  color: #f8fafc !important;
+}
+.dark .text-slate-600 {
+  color: #e2e8f0 !important;
+}
+.dark .text-slate-500 {
+  color: #cbd5e1 !important;
+}
+.dark .text-slate-400 {
+  color: #94a3b8 !important;
+}
+.dark .text-slate-300 {
+  color: #7c8ca3 !important;
+}
+
+.dark .border-slate-50,
+.dark .border-slate-100,
+.dark .border-slate-200,
+.dark .border-slate-300 {
+  border-color: #334155 !important;
+}
+.dark .border-slate-800,
+.dark .border-slate-900 {
+  border-color: #475569 !important;
+}
+
+.dark input::placeholder,
+.dark textarea::placeholder {
+  color: #94a3b8;
+}

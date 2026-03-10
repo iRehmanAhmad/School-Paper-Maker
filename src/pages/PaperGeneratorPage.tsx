@@ -3,6 +3,7 @@ import { getAppSettings } from "@/services/appSettings";
 import { downloadAnswerPdf, downloadQuestionDocx, downloadQuestionPdf, downloadRubricPdf, openPrintableHtml } from "@/services/exporters";
 import { generatePaperBundle } from "@/services/paperEngine";
 import {
+  getBlueprintById,
   getChapters,
   getClasses,
   getExamBodies,
@@ -10,9 +11,11 @@ import {
   getRecentQuestionUsage,
   getSubjects,
   savePaperAndUsage,
+  getPaperBundleById,
 } from "@/services/repositories";
 import { useAppStore } from "@/store/useAppStore";
-import type { BloomLevel, ChapterEntity, ClassEntity, Difficulty, ExamBody, GeneratorSettings, SubjectEntity, QuestionLevel, QuestionType, GeneratedQuestion } from "@/types/domain";
+import { useSearchParams } from "react-router-dom";
+import type { BloomLevel, ChapterEntity, ClassEntity, Difficulty, ExamBody, GeneratorSettings, SubjectEntity, QuestionLevel, QuestionType, GeneratedQuestion, BlueprintSection } from "@/types/domain";
 
 type CompositionRow = {
   type: QuestionType;
@@ -25,6 +28,48 @@ type CompositionRow = {
 
 const difficulties: Difficulty[] = ["easy", "medium", "hard"];
 const blooms: BloomLevel[] = ["remember", "understand", "apply", "analyze", "evaluate"];
+const compositionTypes: QuestionType[] = ["mcq", "true_false", "matching", "fill_blanks", "short", "long", "diagram"];
+
+function defaultMarksForType(type: QuestionType) {
+  if (type === "short") return 2;
+  if (type === "long") return 5;
+  if (type === "diagram") return 3;
+  return 1;
+}
+
+function defaultLinesForType(type: QuestionType) {
+  if (type === "short") return 2;
+  if (type === "long") return 10;
+  if (type === "diagram") return 4;
+  return 0;
+}
+
+function getDefaultCompositionRow(type: QuestionType): CompositionRow {
+  return {
+    type,
+    count: 0,
+    choice: 0,
+    marks: defaultMarksForType(type),
+    emptyLines: defaultLinesForType(type),
+    selected: false,
+  };
+}
+
+function mapBlueprintToComposition(sections: BlueprintSection[]): CompositionRow[] {
+  const byType = new Map<QuestionType, CompositionRow>();
+  compositionTypes.forEach((type) => byType.set(type, getDefaultCompositionRow(type)));
+
+  sections.forEach((section) => {
+    const base = byType.get(section.type) || getDefaultCompositionRow(section.type);
+    const count = Math.max(0, Number(section.count) || 0);
+    const choice = Math.max(0, Number(section.choice ?? section.count) || 0);
+    const marks = Math.max(0, Number(section.marks ?? base.marks) || 0);
+    const emptyLines = Math.max(0, Number(section.empty_lines ?? base.emptyLines) || 0);
+    byType.set(section.type, { ...base, selected: true, count, choice, marks, emptyLines });
+  });
+
+  return compositionTypes.map((type) => byType.get(type) || getDefaultCompositionRow(type));
+}
 
 function resolveQuestionLevel(level: QuestionLevel | undefined): QuestionLevel {
   return level ?? "exercise";
@@ -45,6 +90,7 @@ export function PaperGeneratorPage() {
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [step, setStep] = useState(1);
+  const [searchParams, setSearchParams] = useSearchParams();
   const [examBodyId, setExamBodyId] = useState("");
   const [classId, setClassId] = useState("");
   const [subjectId, setSubjectId] = useState("");
@@ -56,6 +102,7 @@ export function PaperGeneratorPage() {
   const [containerWidth, setContainerWidth] = useState(800);
   const [panX, setPanX] = useState(0);
   const [panY, setPanY] = useState(0);
+  const appliedBlueprintRef = useRef<string | null>(null);
   const isDragging = useRef(false);
   const lastMouse = useRef({ x: 0, y: 0 });
 
@@ -68,6 +115,16 @@ export function PaperGeneratorPage() {
   const [difficultyDistribution] = useState<Record<Difficulty, number>>({ easy: 40, medium: 40, hard: 20 });
   const [bloomDistribution] = useState<Record<BloomLevel, number>>({ remember: 40, understand: 30, apply: 20, analyze: 10, evaluate: 0 });
   const [availableCounts, setAvailableCounts] = useState<Record<QuestionType, number>>({ mcq: 0, true_false: 0, fill_blanks: 0, short: 0, long: 0, matching: 0, diagram: 0 });
+  const [chapterCounts, setChapterCounts] = useState<Record<string, number>>({});
+
+  // Composition Presets
+  const [compositionPresets, setCompositionPresets] = useState<Record<string, CompositionRow[]>>(() => {
+    try {
+      const saved = localStorage.getItem("pg_composition_presets");
+      if (saved) return JSON.parse(saved);
+    } catch (e) { console.error("Could not load presets", e); }
+    return {};
+  });
 
   const appSettings = getAppSettings();
   const subjectName = subjects.find(s => s.id === subjectId)?.name || "";
@@ -82,7 +139,7 @@ export function PaperGeneratorPage() {
     subjectName: "Science",
     timeLabel: "30 min",
     marksLabel: "25",
-    dateLabel: new Date().toLocaleDateString(),
+    dateLabel: new Date().toISOString().split('T')[0],
     instructions: "Attempt all questions clearly. Overwriting is not allowed.",
     teacherName: profile?.full_name || "Teacher",
     signatureBlocks: ["Teacher Sig", "Principal Sig"],
@@ -193,14 +250,142 @@ export function PaperGeneratorPage() {
     if (cName) {
       setHeader(prev => ({ ...prev, className: cName }));
     }
-  }, [classId, classes]);
+
+    // Auto-reset subject if current subject doesn't belong to the newly selected class
+    if (subjectId && subjects.length > 0) {
+      const isValidForClass = subjects.some(s => s.id === subjectId && s.class_id === classId);
+      if (!isValidForClass) {
+        setSubjectId("");
+      }
+    }
+  }, [classId, classes, subjects, subjectId]);
 
   useEffect(() => {
     load();
   }, [profile?.school_id, examBodyId]);
 
+  // Load Saved Paper Workflow
+  useEffect(() => {
+    const loadId = searchParams.get("load");
+    if (!profile?.id || !loadId) return;
+
+    async function fetchSavedPaper() {
+      setIsGenerating(true);
+      try {
+        const bundle = await getPaperBundleById(loadId!);
+        if (bundle) {
+          // Restore Context
+          const settings = bundle.paper.settings_json;
+          setClassId(settings.classId);
+          setSubjectId(settings.subjectId);
+          setChapterIds(settings.chapterIds);
+          setExamBodyId(settings.examBodyId || examBodyId);
+          setSelectedLevels(settings.levels || ["exercise"]);
+          setHeader(settings.header);
+
+          setGenerated(bundle);
+          setStep(4);
+          toast("success", "Paper loaded from My Papers!");
+        } else {
+          toast("error", "Could not find the saved paper.");
+        }
+      } catch (e) {
+        console.error(e);
+        toast("error", "Failed to load saved paper.");
+      } finally {
+        setIsGenerating(false);
+        setSearchParams(new URLSearchParams()); // Clear URL to avoid reloading on every re-mount
+      }
+    }
+    fetchSavedPaper();
+  }, [searchParams.get("load"), profile?.id]);
+
+  useEffect(() => {
+    const blueprintId = searchParams.get("blueprint");
+    const loadId = searchParams.get("load");
+    const schoolId = profile?.school_id;
+    if (typeof schoolId !== "string" || !schoolId || !blueprintId || loadId) return;
+    if (appliedBlueprintRef.current === blueprintId) return;
+    const targetBlueprintId = blueprintId;
+
+    async function applyBlueprintToGenerator() {
+      try {
+        const resolvedSchoolId = schoolId as string;
+        const blueprint = await getBlueprintById(targetBlueprintId);
+        if (!blueprint) {
+          toast("error", "Blueprint not found");
+          return;
+        }
+
+        const allClasses = await getClasses(resolvedSchoolId);
+        const allSubjects = await getSubjects(allClasses.map((c) => c.id));
+        const allChapters = await getChapters(allSubjects.map((s) => s.id));
+
+        const ownerClass = allClasses.find((c) => c.id === blueprint.class_id);
+        if (ownerClass) {
+          setExamBodyId(ownerClass.exam_body_id);
+        }
+        setClassId(blueprint.class_id);
+        setSubjectId(blueprint.subject_id);
+
+        const subjectChapters = allChapters
+          .filter((c) => c.subject_id === blueprint.subject_id)
+          .sort((a, b) => a.chapter_number - b.chapter_number);
+        setChapterIds(subjectChapters.map((c) => c.id));
+
+        setComposition(mapBlueprintToComposition(blueprint.structure_json.sections));
+        setHeader((prev) => ({ ...prev, examTitle: blueprint.name }));
+
+        const levelsFromBlueprint = Array.from(
+          new Set(
+            blueprint.structure_json.sections
+              .map((section) => section.question_level)
+              .filter(Boolean)
+          )
+        ) as QuestionLevel[];
+        if (levelsFromBlueprint.length) {
+          setSelectedLevels(levelsFromBlueprint);
+        }
+
+        appliedBlueprintRef.current = targetBlueprintId;
+        setStep(3);
+        toast("success", `Blueprint loaded: ${blueprint.name}`);
+
+        const nextParams = new URLSearchParams(searchParams);
+        nextParams.delete("blueprint");
+        setSearchParams(nextParams);
+      } catch (error) {
+        toast("error", "Failed to load blueprint into generator");
+      }
+    }
+
+    applyBlueprintToGenerator();
+  }, [searchParams.get("blueprint"), searchParams.get("load"), profile?.school_id]);
+
   const filteredSubjects = useMemo(() => subjects.filter((s) => s.class_id === classId), [subjects, classId]);
-  const filteredChapters = useMemo(() => chapters.filter((c) => c.subject_id === subjectId), [chapters, subjectId]);
+  const filteredChapters = useMemo(() => {
+    return chapters
+      .filter((c) => c.subject_id === subjectId)
+      .sort((a, b) => a.chapter_number - b.chapter_number);
+  }, [chapters, subjectId]);
+
+  // Fetch individual chapter counts for display in the syllabus step
+  useEffect(() => {
+    async function fetchChapterCounts() {
+      if (!profile?.school_id || filteredChapters.length === 0) {
+        setChapterCounts({});
+        return;
+      }
+      const cIds = filteredChapters.map(c => c.id);
+      const q = await getQuestions(profile.school_id, cIds);
+      const counts: Record<string, number> = {};
+      q.forEach(question => {
+        counts[question.chapter_id] = (counts[question.chapter_id] || 0) + 1;
+      });
+      setChapterCounts(counts);
+    }
+    fetchChapterCounts();
+  }, [profile?.school_id, filteredChapters]);
 
   useEffect(() => {
     async function updateCounts() {
@@ -247,7 +432,7 @@ export function PaperGeneratorPage() {
       }));
 
     if (activeSections.length === 0) {
-      toast("warning", "Please select at least one question type (Section) for the paper.");
+      toast("error", "Please select at least one question type (Section) for the paper.");
       return false;
     }
 
@@ -373,6 +558,18 @@ export function PaperGeneratorPage() {
                     </select>
                   </div>
                 </div>
+
+                {/* Visual Confirmation Badge */}
+                {(header.className || header.subjectName) && (
+                  <div className="mt-6 p-4 rounded-2xl bg-brand/5 border border-brand/10 flex items-center justify-center gap-3">
+                    <span className="text-xs font-bold text-slate-500">Selected Setup:</span>
+                    <span className="px-3 py-1 rounded-full bg-white border border-slate-200 text-[10px] font-black uppercase text-slate-700 shadow-sm tracking-widest">{header.className || "Class"}</span>
+                    <span className="text-slate-300">➔</span>
+                    <span className={`px-3 py-1 rounded-full text-[10px] uppercase tracking-widest font-black shadow-sm ${subjectId ? 'bg-brand text-white border border-transparent' : 'bg-rose-50 text-rose-500 border border-rose-200'}`}>
+                      {subjectId ? header.subjectName : "No Subject Selected"}
+                    </span>
+                  </div>
+                )}
               </div>
 
               <div className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
@@ -398,10 +595,15 @@ export function PaperGeneratorPage() {
                   <div className="space-y-2">
                     <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Exam Title</label>
                     <input className="w-full rounded-2xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm focus:border-brand-light focus:bg-white outline-none transition-all font-bold text-slate-700" value={header.examTitle} onChange={(e) => setHeader((p) => ({ ...p, examTitle: e.target.value }))} placeholder="e.g. Mid-Term 2024" />
+                    <div className="flex flex-wrap gap-1.5 pt-1">
+                      {["Monthly Test", "Mid-Term", "Final Term", "Weekly Quiz"].map(t => (
+                        <button key={t} onClick={() => setHeader(p => ({ ...p, examTitle: t }))} className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-500 rounded-lg text-[9px] font-black uppercase tracking-widest transition-colors">{t}</button>
+                      ))}
+                    </div>
                   </div>
                   <div className="space-y-2">
                     <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Date</label>
-                    <input className="w-full rounded-2xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm focus:border-brand-light focus:bg-white outline-none transition-all font-bold text-slate-700" value={header.dateLabel} onChange={(e) => setHeader((p) => ({ ...p, dateLabel: e.target.value }))} />
+                    <input type="date" className="w-full rounded-2xl border border-slate-200 bg-slate-50/50 px-4 py-3 text-sm focus:border-brand-light focus:bg-white outline-none transition-all font-bold text-slate-700" value={header.dateLabel} onChange={(e) => setHeader((p) => ({ ...p, dateLabel: e.target.value }))} />
                   </div>
                   <div className="space-y-2 md:col-span-2">
                     <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">General Instructions</label>
@@ -418,7 +620,7 @@ export function PaperGeneratorPage() {
                 <button
                   onClick={() => setStep(2)}
                   disabled={!subjectId}
-                  className="w-full mt-6 rounded-2xl bg-brand py-4 font-bold text-white shadow-lg shadow-brand/20 hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-50 flex items-center justify-center gap-2 group"
+                  className="w-full mt-6 rounded-2xl bg-brand py-4 font-bold text-white shadow-lg shadow-brand/20 hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-50 flex items-center justify-center gap-2 group disabled:pointer-events-none disabled:bg-slate-300 disabled:shadow-none"
                 >
                   Continue to Syllabus
                   <svg className="group-hover:translate-x-1 transition-transform" width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7l5 5m0 0l-5 5m5-5H6" /></svg>
@@ -437,15 +639,37 @@ export function PaperGeneratorPage() {
                     <span className="w-8 h-8 rounded-lg bg-brand/10 text-brand flex items-center justify-center text-sm font-black">3</span>
                     Select Chapters
                   </div>
-                  <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{chapterIds.length} Chapters</div>
+                  <div className="flex items-center gap-3">
+                    <label className="flex items-center gap-2 cursor-pointer text-[10px] font-black uppercase tracking-widest text-slate-500 hover:text-brand transition-colors">
+                      <input
+                        type="checkbox"
+                        className="w-3.5 h-3.5 rounded border-slate-300 text-brand focus:ring-brand"
+                        checked={filteredChapters.length > 0 && chapterIds.length === filteredChapters.length}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setChapterIds(filteredChapters.map(c => c.id));
+                          } else {
+                            setChapterIds([]);
+                          }
+                        }}
+                      />
+                      Select All
+                    </label>
+                    <div className="px-2 py-0.5 rounded bg-slate-100 text-[10px] font-black text-slate-500 uppercase tracking-widest">{chapterIds.length} Selected</div>
+                  </div>
                 </h3>
                 <div className="space-y-2 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
                   {filteredChapters.map((c) => (
                     <label key={c.id} className={`flex items-center gap-3 p-4 rounded-2xl border transition-all cursor-pointer ${chapterIds.includes(c.id) ? "border-brand-light bg-brand/5 shadow-sm" : "border-slate-100 hover:border-slate-200 hover:bg-slate-50"}`}>
                       <input type="checkbox" className="w-5 h-5 rounded-lg border-slate-300 text-brand focus:ring-brand" checked={chapterIds.includes(c.id)} onChange={(e) => e.target.checked ? setChapterIds([...chapterIds, c.id]) : setChapterIds(chapterIds.filter(id => id !== c.id))} />
-                      <div className="flex-1">
-                        <div className="text-[10px] font-black text-slate-400 mb-0.5">CH {c.chapter_number}</div>
-                        <div className="text-sm font-black text-slate-800">{c.title}</div>
+                      <div className="flex-1 flex justify-between items-center">
+                        <div>
+                          <div className="text-[10px] font-black text-slate-400 mb-0.5">CH {c.chapter_number}</div>
+                          <div className="text-sm font-black text-slate-800">{c.title}</div>
+                        </div>
+                        <span className={`text-[10px] font-black px-2 py-1 rounded-full ${chapterCounts[c.id] ? "bg-emerald-50 text-emerald-600" : "bg-slate-100 text-slate-400"}`}>
+                          {chapterCounts[c.id] || 0} Qs
+                        </span>
                       </div>
                     </label>
                   ))}
@@ -453,11 +677,13 @@ export function PaperGeneratorPage() {
               </div>
 
               <div className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
-                <h3 className="text-lg font-bold mb-6 flex items-center gap-2 text-slate-800">
-                  <span className="w-8 h-8 rounded-lg bg-brand/10 text-brand flex items-center justify-center text-sm font-black">4</span>
-                  Question Origin
+                <h3 className="text-lg font-bold mb-6 flex items-center justify-between text-slate-800">
+                  <div className="flex items-center gap-2">
+                    <span className="w-8 h-8 rounded-lg bg-brand/10 text-brand flex items-center justify-center text-sm font-black">4</span>
+                    Question Origin
+                  </div>
                 </h3>
-                <div className="grid gap-3 sm:grid-cols-2">
+                <div className="grid gap-3 sm:grid-cols-2 mb-8">
                   {levels.map((lvl) => (
                     <label key={lvl.id} className={`flex items-center gap-3 p-4 rounded-2xl border transition-all cursor-pointer ${selectedLevels.includes(lvl.id) ? "border-brand-light bg-brand/5 shadow-sm" : "border-slate-100 hover:border-slate-200 hover:bg-slate-50"}`}>
                       <input type="checkbox" className="w-5 h-5 rounded-lg border-slate-300 text-brand focus:ring-brand" checked={selectedLevels.includes(lvl.id)} onChange={(e) => e.target.checked ? setSelectedLevels([...selectedLevels, lvl.id]) : setSelectedLevels(selectedLevels.filter(x => x !== lvl.id))} />
@@ -465,13 +691,56 @@ export function PaperGeneratorPage() {
                     </label>
                   ))}
                 </div>
+
+                <div className="space-y-4 pt-6 border-t border-slate-100">
+                  <div>
+                    <div className="flex justify-between items-center mb-2">
+                      <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Avoid Recent Papers</label>
+                      <span className="text-xs font-black text-brand bg-brand/10 px-2 rounded">{recentPapersToAvoid}</span>
+                    </div>
+                    <p className="text-[10px] text-slate-400 font-medium mb-3 ml-1">The system will try not to use questions that appeared in the last {recentPapersToAvoid} papers.</p>
+                    <input
+                      type="range"
+                      min="0" max="10"
+                      value={recentPapersToAvoid}
+                      onChange={(e) => setRecentPapersToAvoid(Number(e.target.value))}
+                      className="w-full accent-brand h-1.5 bg-slate-100 rounded-lg appearance-none cursor-pointer"
+                    />
+                    <div className="flex justify-between text-[9px] font-black text-slate-300 uppercase mt-1 px-1">
+                      <span>0 (None)</span>
+                      <span>5</span>
+                      <span>10 (Max)</span>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
 
             <div className="space-y-4">
               <div className="rounded-3xl border border-slate-200 bg-white p-6 sticky top-4 shadow-sm">
                 <div className="space-y-4 mb-6">
-                  <div className="flex justify-between text-xs font-black uppercase tracking-widest"><span className="text-slate-500 font-medium">Pool Size</span><span className="text-brand">{Object.values(availableCounts).reduce((a, b) => a + b, 0)} Qs</span></div>
+                  <div className="flex justify-between items-center border-b border-slate-100 pb-3">
+                    <span className="text-xs font-black uppercase tracking-widest text-slate-500">Pool Size</span>
+                    <span className="text-brand text-lg font-black">{Object.values(availableCounts).reduce((a, b) => a + b, 0)} Qs</span>
+                  </div>
+
+                  {Object.values(availableCounts).reduce((a, b) => a + b, 0) > 0 ? (
+                    <div className="space-y-2 pt-2">
+                      {(Object.entries(availableCounts) as [QuestionType, number][])
+                        .filter(([_, count]) => count > 0)
+                        .sort((a, b) => b[1] - a[1]) // Sort by count descending
+                        .map(([type, count]) => (
+                          <div key={type} className="flex justify-between items-center text-[10px] font-black text-slate-600 uppercase tracking-widest">
+                            <span>{type.replace("_", " ")}</span>
+                            <span className="bg-slate-100 text-slate-500 px-2 py-0.5 rounded leading-none">{count}</span>
+                          </div>
+                        ))}
+                    </div>
+                  ) : (
+                    <div className="text-center py-4 text-[10px] font-black text-amber-500 uppercase tracking-widest bg-amber-50 rounded-xl border border-amber-100">
+                      Select chapters & levels
+                    </div>
+                  )}
                 </div>
                 <button onClick={() => setStep(3)} disabled={!chapterIds.length} className="w-full rounded-2xl bg-brand py-4 font-bold text-white shadow-lg shadow-brand/20 hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-50 flex items-center justify-center gap-2 group">Configure Composition <svg className="group-hover:translate-x-1 transition-transform" width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7l5 5m0 0l-5 5m5-5H6" /></svg></button>
                 <button onClick={() => setStep(1)} className="w-full mt-3 rounded-2xl bg-slate-100 py-3 font-bold text-slate-400 hover:bg-slate-200 transition-all text-xs uppercase tracking-widest">Back</button>
@@ -488,6 +757,40 @@ export function PaperGeneratorPage() {
                   <span className="w-8 h-8 rounded-lg bg-brand/10 text-brand flex items-center justify-center text-sm font-black">5</span>
                   Construction Strategy
                 </div>
+                {/* Save/Load Preset UI */}
+                <div className="flex items-center gap-2">
+                  {Object.keys(compositionPresets).length > 0 && (
+                    <select
+                      className="bg-slate-50 border border-slate-200 text-[10px] font-black uppercase tracking-widest text-slate-600 rounded-lg px-3 py-2 outline-none focus:border-brand transition-colors appearance-none cursor-pointer"
+                      onChange={(e) => {
+                        if (e.target.value) {
+                          setComposition(compositionPresets[e.target.value]);
+                          toast("success", `Loaded preset: ${e.target.value}`);
+                          e.target.value = ""; // Reset select
+                        }
+                      }}
+                    >
+                      <option value="">Load Preset...</option>
+                      {Object.keys(compositionPresets).map(name => (
+                        <option key={name} value={name}>{name}</option>
+                      ))}
+                    </select>
+                  )}
+                  <button
+                    onClick={() => {
+                      const name = prompt("Enter a name for this paper composition preset:");
+                      if (name && name.trim()) {
+                        const newPresets = { ...compositionPresets, [name.trim()]: composition };
+                        setCompositionPresets(newPresets);
+                        localStorage.setItem("pg_composition_presets", JSON.stringify(newPresets));
+                        toast("success", "Preset saved successfully!");
+                      }
+                    }}
+                    className="flex items-center gap-1.5 px-3 py-2 bg-brand/10 text-brand hover:bg-brand hover:text-white rounded-lg transition-colors text-[10px] font-black uppercase tracking-widest cursor-pointer"
+                  >
+                    <span>💾</span> Save Preset
+                  </button>
+                </div>
               </h3>
 
               <div className="overflow-x-auto -mx-8">
@@ -497,30 +800,43 @@ export function PaperGeneratorPage() {
                       <th className="px-8 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Select</th>
                       <th className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">Type</th>
                       <th className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Qty</th>
-                      <th className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Choice</th>
+                      <th className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center" title="How many questions the student must attempt">Attempt From</th>
                       <th className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Marks</th>
                       <th className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Lines</th>
-                      <th className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Total</th>
+                      <th className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Total Marks</th>
                       <th className="px-4 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right pr-8">Available</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {(["mcq", "true_false", "matching", "fill_blanks", "short", "long", "diagram"] as QuestionType[]).map((type) => {
-                      const row = composition.find(r => r.type === type) || { type, count: 0, choice: 0, marks: 0, emptyLines: 0, selected: false };
-                      const available = availableCounts[type] || 0;
-                      return (
-                        <tr key={type} className={`border-b border-slate-50 transition-colors ${row.selected ? "bg-brand/5 font-black" : "hover:bg-slate-50/50"}`}>
-                          <td className="px-8 py-4"><input type="checkbox" className="w-5 h-5 rounded-lg border-slate-300 text-brand focus:ring-brand" checked={row.selected} onChange={(e) => setComposition(composition.map(r => r.type === type ? { ...r, selected: e.target.checked } : r))} /></td>
-                          <td className="px-4 py-4 text-[11px] font-black uppercase text-slate-700 tracking-tighter">{type.replace("_", " ")}</td>
-                          <td className="px-4 py-4"><input type="number" className="w-16 mx-auto block rounded-xl border border-slate-200 px-2 py-1.5 text-xs text-center focus:border-brand outline-none font-black" value={row.count} onChange={(e) => setComposition(composition.map(r => r.type === type ? { ...r, count: Number(e.target.value) } : r))} /></td>
-                          <td className="px-4 py-4"><input type="number" className="w-16 mx-auto block rounded-xl border border-slate-200 px-2 py-1.5 text-xs text-center focus:border-brand outline-none font-black" value={row.choice} onChange={(e) => setComposition(composition.map(r => r.type === type ? { ...r, choice: Number(e.target.value) } : r))} /></td>
-                          <td className="px-4 py-4"><input type="number" className="w-14 mx-auto block rounded-xl border border-slate-200 px-2 py-1.5 text-xs text-center focus:border-brand outline-none font-black" value={row.marks} onChange={(e) => setComposition(composition.map(r => r.type === type ? { ...r, marks: Number(e.target.value) } : r))} /></td>
-                          <td className="px-4 py-4"><input type="number" className="w-14 mx-auto block rounded-xl border border-slate-200 px-2 py-1.5 text-xs text-center focus:border-brand outline-none font-black" value={row.emptyLines} onChange={(e) => setComposition(composition.map(r => r.type === type ? { ...r, emptyLines: Number(e.target.value) } : r))} /></td>
-                          <td className="px-4 py-4 text-center text-xs text-brand font-black">{row.selected ? row.choice * row.marks : 0}</td>
-                          <td className="px-4 py-4 text-right pr-8"><span className={`text-[10px] font-black ${available < row.count ? "text-rose-600" : "text-emerald-600"}`}>{available} Qs</span></td>
-                        </tr>
-                      );
-                    })}
+                    {compositionTypes
+                      .filter(type => availableCounts[type] > 0 || composition.find(r => r.type === type)?.selected)
+                      .map((type) => {
+                        const row = composition.find(r => r.type === type) || getDefaultCompositionRow(type);
+                        const available = availableCounts[type] || 0;
+                        const isObjective = type === "mcq" || type === "true_false";
+
+                        const updateRow = (updates: Partial<CompositionRow>) => {
+                          setComposition(prev => {
+                            if (!prev.find(r => r.type === type)) {
+                              return [...prev, { ...getDefaultCompositionRow(type), ...updates }];
+                            }
+                            return prev.map(r => r.type === type ? { ...r, ...updates } : r);
+                          });
+                        };
+
+                        return (
+                          <tr key={type} className={`border-b border-slate-50 transition-colors ${row.selected ? "bg-brand/5 font-black" : "hover:bg-slate-50/50 opacity-60"}`}>
+                            <td className="px-8 py-4"><input type="checkbox" className="w-5 h-5 rounded-lg border-slate-300 text-brand focus:ring-brand cursor-pointer" checked={row.selected} onChange={(e) => updateRow({ selected: e.target.checked })} /></td>
+                            <td className="px-4 py-4 text-[11px] font-black uppercase text-slate-700 tracking-tighter">{type.replace("_", " ")}</td>
+                            <td className="px-4 py-4"><input type="number" min={0} max={available} disabled={!row.selected} className={`w-16 mx-auto block rounded-xl border border-slate-200 px-2 py-1.5 text-xs text-center focus:border-brand outline-none font-black disabled:opacity-50 disabled:bg-slate-100 disabled:cursor-not-allowed`} value={row.count} onChange={(e) => updateRow({ count: Number(e.target.value) })} /></td>
+                            <td className="px-4 py-4"><input type="number" min={0} max={row.count} disabled={!row.selected} className={`w-16 mx-auto block rounded-xl border border-slate-200 px-2 py-1.5 text-xs text-center focus:border-brand outline-none font-black disabled:opacity-50 disabled:bg-slate-100 disabled:cursor-not-allowed`} value={row.choice} onChange={(e) => updateRow({ choice: Number(e.target.value) })} title={row.choice < row.count ? "WARNING: Cannot attempt fewer than total qty" : ""} /></td>
+                            <td className="px-4 py-4"><input type="number" min={0} disabled={!row.selected} className={`w-14 mx-auto block rounded-xl border border-slate-200 px-2 py-1.5 text-xs text-center focus:border-brand outline-none font-black disabled:opacity-50 disabled:bg-slate-100 disabled:cursor-not-allowed`} value={row.marks} onChange={(e) => updateRow({ marks: Number(e.target.value) })} /></td>
+                            <td className="px-4 py-4"><input type="number" min={0} disabled={isObjective || !row.selected} className={`w-14 mx-auto block rounded-xl border px-2 py-1.5 text-xs text-center outline-none font-black ${(isObjective || !row.selected) ? 'bg-slate-100 opacity-50 border-transparent text-slate-400 cursor-not-allowed' : 'border-slate-200 focus:border-brand'}`} value={isObjective ? 0 : row.emptyLines} onChange={(e) => updateRow({ emptyLines: Number(e.target.value) })} /></td>
+                            <td className="px-4 py-4 text-center text-xs text-brand font-black">{row.selected ? row.choice * row.marks : 0}</td>
+                            <td className="px-4 py-4 text-right pr-8"><span className={`text-[10px] font-black px-2 py-1 rounded-full ${available < row.count ? "bg-rose-50 text-rose-600" : "bg-emerald-50 text-emerald-600"}`}>{available} Qs</span></td>
+                          </tr>
+                        );
+                      })}
                   </tbody>
                   <tfoot>
                     <tr className="bg-slate-50 font-black border-t-2 border-slate-100">
@@ -534,16 +850,23 @@ export function PaperGeneratorPage() {
 
               <div className="mt-8 flex justify-between items-center bg-slate-50 -mx-8 -mb-8 px-8 py-8 rounded-b-3xl border-t border-slate-100">
                 <button onClick={() => setStep(2)} className="rounded-2xl px-6 py-3 font-bold text-slate-400 hover:bg-slate-200 transition-all text-xs uppercase tracking-widest">Back</button>
-                <button
-                  disabled={isGenerating}
-                  onClick={async () => {
-                    const success = await generate();
-                    if (success) setStep(4);
-                  }}
-                  className="rounded-2xl bg-brand px-12 py-5 font-black text-white shadow-2xl shadow-brand/40 hover:scale-105 active:scale-95 transition-all flex items-center gap-3 uppercase text-xs tracking-[0.2em] disabled:opacity-50"
-                >
-                  {isGenerating ? "Generating..." : "Generate & Preview"} <span className="text-xl">✨</span>
-                </button>
+                <div className="flex flex-col items-end gap-2">
+                  <button
+                    disabled={isGenerating || composition.some(r => r.selected && r.count > (availableCounts[r.type] || 0))}
+                    onClick={async () => {
+                      const success = await generate();
+                      if (success) setStep(4);
+                    }}
+                    className="rounded-2xl bg-brand px-12 py-5 font-black text-white shadow-2xl shadow-brand/40 hover:scale-105 active:scale-95 transition-all flex items-center gap-3 uppercase text-xs tracking-[0.2em] disabled:opacity-50 disabled:pointer-events-none disabled:bg-slate-400 disabled:shadow-none"
+                  >
+                    {isGenerating ? "Generating..." : "Generate & Preview"} <span className="text-xl">✨</span>
+                  </button>
+                  {composition.some(r => r.selected && r.count > (availableCounts[r.type] || 0)) && (
+                    <span className="text-[10px] font-black text-rose-500 uppercase tracking-widest px-2 relative -top-1">
+                      ⚠️ Selected qty exceeds available pool
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
           </div>
@@ -553,113 +876,93 @@ export function PaperGeneratorPage() {
           <div className="animate-in fade-in zoom-in-95 duration-700 flex flex-col gap-6">
             {/* Unified Top Control Bar (Truly Horizontal Ribbon) */}
             <div className="sticky top-4 z-40 flex flex-col gap-2">
-              {/* Secondary Configuration Toolbar (New) */}
-              <div className="w-full bg-white/60 backdrop-blur-2xl px-6 py-2 rounded-2xl shadow-xl shadow-slate-900/5 border border-white/50 ring-1 ring-slate-900/5 flex items-center justify-between gap-4">
-                <div className="flex items-center gap-6">
-                  <div className="flex items-center gap-2">
-                    <span className="text-[9px] font-black uppercase text-slate-400 tracking-widest">Medium:</span>
-                    <select className="bg-white/50 border border-slate-200 rounded-md px-2 py-0.5 text-[10px] font-bold text-slate-700 outline-none focus:border-brand" value={header.medium} onChange={(e) => setHeader({ ...header, medium: e.target.value as any })}>
-                      <option value="English">English</option>
-                      <option value="Urdu">Urdu</option>
-                      <option value="Both">Both</option>
-                    </select>
-                  </div>
+              <div className="w-full bg-white/95 backdrop-blur-3xl p-5 rounded-[1.5rem] shadow-2xl shadow-slate-900/10 border border-white ring-1 ring-slate-900/5 flex flex-wrap items-center gap-y-4 gap-x-6 justify-between">
 
-                  <div className="flex items-center gap-2">
-                    <span className="text-[9px] font-black uppercase text-slate-400 tracking-widest">Paper:</span>
-                    <select className="bg-white/50 border border-slate-200 rounded-md px-2 py-0.5 text-[10px] font-bold text-slate-700 outline-none focus:border-brand" value={header.paperSize} onChange={(e) => setHeader({ ...header, paperSize: e.target.value as any })}>
-                      <option value="A4">A4 (8.27" x 11.69")</option>
-                      <option value="Letter">Letter (8.5" x 11")</option>
-                      <option value="Legal">Legal (8.5" x 14")</option>
-                    </select>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <span className="text-[9px] font-black uppercase text-slate-400 tracking-widest">Time:</span>
-                    <input type="text" className="bg-white/50 border border-slate-200 rounded-md px-2 py-0.5 text-[10px] font-bold text-slate-700 outline-none focus:border-brand w-20" value={header.timeLabel} onChange={(e) => setHeader({ ...header, timeLabel: e.target.value })} />
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <span className="text-[9px] font-black uppercase text-slate-400 tracking-widest">Term:</span>
-                    <input type="text" className="bg-white/50 border border-slate-200 rounded-md px-2 py-0.5 text-[10px] font-bold text-slate-700 outline-none focus:border-brand w-24" value={header.term} onChange={(e) => setHeader({ ...header, term: e.target.value })} />
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <span className="text-[9px] font-black uppercase text-slate-400 tracking-widest">Blanks:</span>
-                    <select className="bg-white/50 border border-slate-200 rounded-md px-2 py-0.5 text-[10px] font-bold text-slate-700 outline-none focus:border-brand" value={header.blankInlineFor} onChange={(e) => setHeader({ ...header, blankInlineFor: e.target.value as any })}>
-                      <option value="English">English</option>
-                      <option value="Urdu">Urdu</option>
-                      <option value="Math">Math</option>
-                      <option value="None">None</option>
-                    </select>
-                  </div>
+                {/* Paper Settings */}
+                <div className="flex flex-wrap items-center gap-3">
+                  <select className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-[10px] font-bold text-slate-700 outline-none focus:border-brand" value={header.medium} onChange={(e) => setHeader({ ...header, medium: e.target.value as any })}>
+                    <option value="English">Medium: English</option>
+                    <option value="Urdu">Medium: Urdu</option>
+                    <option value="Both">Medium: Both</option>
+                  </select>
+                  <select className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-[10px] font-bold text-slate-700 outline-none focus:border-brand" value={header.paperSize} onChange={(e) => setHeader({ ...header, paperSize: e.target.value as any })}>
+                    <option value="A4">Size: A4</option>
+                    <option value="Letter">Size: Letter</option>
+                    <option value="Legal">Size: Legal</option>
+                  </select>
+                  <input type="text" placeholder="Time" className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-[10px] font-bold text-slate-700 outline-none focus:border-brand w-20" value={header.timeLabel} onChange={(e) => setHeader({ ...header, timeLabel: e.target.value })} />
+                  <input type="text" placeholder="Term" className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-[10px] font-bold text-slate-700 outline-none focus:border-brand w-24" value={header.term} onChange={(e) => setHeader({ ...header, term: e.target.value })} />
+                  <select className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-[10px] font-bold text-slate-700 outline-none focus:border-brand" value={header.blankInlineFor} onChange={(e) => setHeader({ ...header, blankInlineFor: e.target.value as any })}>
+                    <option value="English">Blanks: English</option>
+                    <option value="Urdu">Blanks: Urdu</option>
+                    <option value="Math">Blanks: Math</option>
+                    <option value="None">Blanks: None</option>
+                  </select>
                 </div>
-                <div className="text-[9px] font-bold text-brand uppercase tracking-widest flex items-center gap-1.5">
-                  <div className="w-1.5 h-1.5 rounded-full bg-brand animate-pulse" />
-                  Live Preview Optimization
-                </div>
-              </div>
 
-              {/* Primary View Toolbar (Existing) */}
-              <div className="w-full bg-white/95 backdrop-blur-3xl px-6 py-4 rounded-[1.5rem] shadow-2xl shadow-slate-900/10 border border-white ring-1 ring-slate-900/5 flex items-center justify-between gap-4">
-                {/* Visual Adjustment Group */}
-                <div className="flex items-center gap-6 border-r pr-6 border-slate-100 overflow-x-auto no-scrollbar">
-                  <div className="flex items-center gap-3">
+                {/* Visual Settings */}
+                <div className="flex flex-wrap items-center gap-5">
+                  <div className="flex items-center gap-2">
                     <span className="text-[9px] font-black uppercase text-slate-400 tracking-widest whitespace-nowrap">Font Size</span>
-                    <input type="range" min={10} max={16} step={1} value={header.contentFontSize} onChange={(e) => setHeader(h => ({ ...h, contentFontSize: Number(e.target.value) }))} className="w-20 h-1 accent-brand appearance-none bg-slate-100 rounded-full" />
-                    <span className="text-[10px] font-black text-brand w-8 text-center">{header.contentFontSize}px</span>
+                    <input type="range" min={10} max={16} step={1} value={header.contentFontSize} onChange={(e) => setHeader(h => ({ ...h, contentFontSize: Number(e.target.value) }))} className="w-20 h-1.5 accent-brand bg-slate-100 rounded-full cursor-pointer" />
                   </div>
-
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-2">
                     <span className="text-[9px] font-black uppercase text-slate-400 tracking-widest whitespace-nowrap">Zoom</span>
-                    <input type="range" min={0.5} max={2.0} step={0.05} value={previewScale} onChange={(e) => setPreviewScale(Number(e.target.value))} className="w-20 h-1 accent-slate-900 appearance-none bg-slate-100 rounded-full" />
-                    <span className="text-[10px] font-black text-slate-900 w-12 text-center">{Math.round(previewScale * 100)}%</span>
+                    <input type="range" min={0.5} max={2.0} step={0.05} value={previewScale} onChange={(e) => setPreviewScale(Number(e.target.value))} className="w-20 h-1.5 accent-slate-900 bg-slate-100 rounded-full cursor-pointer" />
                   </div>
-
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-2">
                     <span className="text-[9px] font-black uppercase text-slate-400 tracking-widest whitespace-nowrap">Layout</span>
                     <div className="bg-slate-100 p-0.5 rounded-lg flex gap-0.5">
-                      <button onClick={() => setHeader(h => ({ ...h, printMode: "single" }))} className={`px-3 py-1 rounded-md text-[9px] font-black transition-all ${header.printMode === "single" ? "bg-white text-brand shadow-sm" : "text-slate-500 hover:bg-slate-200"}`}>SINGLE</button>
-                      <button onClick={() => setHeader(h => ({ ...h, printMode: "double" }))} className={`px-3 py-1 rounded-md text-[9px] font-black transition-all ${header.printMode === "double" ? "bg-white text-brand shadow-sm" : "text-slate-500 hover:bg-slate-200"}`}>DOUBLE</button>
+                      <button onClick={() => setHeader(h => ({ ...h, printMode: "single" }))} className={`px-3 py-1.5 rounded-md text-[9px] font-black uppercase tracking-wider transition-all ${header.printMode === "single" ? "bg-white text-brand shadow-sm" : "text-slate-500 hover:bg-slate-200"}`}>Single</button>
+                      <button onClick={() => setHeader(h => ({ ...h, printMode: "double" }))} className={`px-3 py-1.5 rounded-md text-[9px] font-black uppercase tracking-wider transition-all ${header.printMode === "double" ? "bg-white text-brand shadow-sm" : "text-slate-500 hover:bg-slate-200"}`}>Double</button>
                     </div>
                   </div>
                 </div>
 
-                {/* Status & Storage (New) */}
-                <div className="flex items-center gap-4 px-4 border-r border-slate-100 hidden lg:flex">
-                  <button
-                    onClick={() => {
-                      if (confirm("This will clear all generated papers to free up space. Continue?")) {
-                        localStorage.removeItem("pg_papers");
-                        localStorage.removeItem("pg_paper_questions");
-                        localStorage.removeItem("pg_usage");
-                        window.location.reload();
-                      }
-                    }}
-                    className="text-[9px] font-black uppercase text-rose-400 hover:text-rose-600 transition-colors tracking-widest"
-                  >
-                    Clear History ♻️
+                {/* Actions */}
+                <div className="flex flex-wrap items-center gap-2 lg:ml-auto w-full lg:w-auto justify-end border-t lg:border-t-0 border-slate-100 pt-3 lg:pt-0 mt-1 lg:mt-0">
+                  <button onClick={() => downloadAnswerPdf(generated!.sets[0], { ...generated!.paper.settings_json, header: { ...(generated!.paper.settings_json as any).header, ...header } } as any)} className="px-4 py-2 rounded-lg bg-white border border-slate-200 hover:border-brand hover:text-brand font-bold uppercase text-[10px] tracking-wide text-slate-600 transition-all shadow-sm">
+                    Answer Key
                   </button>
-                </div>
+                  <button onClick={() => downloadQuestionDocx(generated!.sets[0], { ...generated!.paper.settings_json, header: { ...(generated!.paper.settings_json as any).header, ...header } } as any)} className="px-4 py-2 rounded-lg bg-[#2b579a] hover:bg-[#1e3e6d] text-white font-bold uppercase text-[10px] tracking-wide transition-all shadow-sm">
+                    Word Docx
+                  </button>
+                  <button onClick={() => openPrintableHtml(generated!.sets[0], { ...generated!.paper.settings_json, header: { ...(generated!.paper.settings_json as any).header, ...header } } as any)} className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-white font-bold uppercase text-[10px] tracking-wide transition-all shadow-sm">
+                    PDF / Print
+                  </button>
 
-                {/* Action Buttons Group (Single Line) */}
-                <div className="flex items-center justify-end gap-1.5 flex-nowrap shrink-0">
-                  <button onClick={() => downloadAnswerPdf(generated!.sets[0], { ...generated!.paper.settings_json, header: { ...(generated!.paper.settings_json as any).header, ...header } } as any)} className="whitespace-nowrap flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white border border-slate-300 hover:border-brand hover:text-brand transition-all font-bold uppercase text-[11px] tracking-wide text-slate-600">
-                    KEY 🔑
+                  <div className="hidden lg:block w-[1px] h-6 bg-slate-200 mx-2" />
+
+                  <button disabled={isGenerating} onClick={async () => { await generate(); }} className="px-4 py-2 rounded-lg bg-emerald-50 text-emerald-600 hover:bg-emerald-100 font-bold uppercase text-[10px] tracking-wide transition-all disabled:opacity-50">Regenerate</button>
+                  <button onClick={() => {
+                    const autoName = `${header.subjectName} - ${header.className} - ${header.dateLabel}`;
+                    const currentHeader = (generated?.paper.settings_json as any)?.header || {};
+                    const name = prompt("Enter a name to save this paper:", currentHeader.paperName || autoName);
+                    if (name) {
+                      const papers = JSON.parse(localStorage.getItem("pg_papers") || "[]");
+                      const updatedPapers = papers.map((p: any) => {
+                        if (p.id === generated?.paper.id) {
+                          return { ...p, settings_json: { ...p.settings_json, header: { ...p.settings_json.header, paperName: name } } };
+                        }
+                        return p;
+                      });
+                      localStorage.setItem("pg_papers", JSON.stringify(updatedPapers));
+                      toast("success", "Paper saved to My Papers successfully!");
+                      // Manually dispatch storage event so other components (like AppLayout) can re-fetch
+                      window.dispatchEvent(new Event("storage"));
+                    }
+                  }} className="px-4 py-2 rounded-lg bg-brand/10 text-brand hover:bg-brand hover:text-white font-bold uppercase text-[10px] tracking-wide transition-all flex items-center gap-1.5 shadow-sm">
+                    💾 Save Paper
                   </button>
-                  <button onClick={() => openPrintableHtml(generated!.sets[0], { ...generated!.paper.settings_json, header: { ...(generated!.paper.settings_json as any).header, ...header } } as any)} className="whitespace-nowrap flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-amber-500 text-white shadow-sm hover:scale-[1.03] active:scale-95 transition-all font-bold uppercase text-[11px] tracking-wide">
-                    PRINT / PDF 🖨️
-                  </button>
-                  <div className="w-[1px] h-5 bg-slate-200 mx-1" />
-                  <button onClick={() => setStep(3)} className="whitespace-nowrap px-3.5 py-2 rounded-lg bg-slate-100 font-bold text-slate-600 hover:bg-slate-200 transition-all text-[10px] uppercase tracking-wide">Edit</button>
-                  <button onClick={() => { setGenerated(null); setStep(1); }} className="whitespace-nowrap px-3.5 py-2 rounded-lg bg-rose-50 font-bold text-rose-500 hover:bg-rose-100 transition-all text-[10px] uppercase tracking-wide">Reset</button>
+                  <button onClick={() => setStep(3)} className="px-4 py-2 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200 font-bold uppercase text-[10px] tracking-wide transition-all">Edit Paper</button>
+                  <button onClick={() => { setGenerated(null); setStep(1); }} className="px-4 py-2 rounded-lg bg-rose-50 text-rose-500 hover:bg-rose-100 font-bold uppercase text-[10px] tracking-wide transition-all">Reset All</button>
                 </div>
               </div>
             </div>
 
             {/* Maximized Paper Preview Container — always fits, pannable when zoomed */}
             <div
-              key={generated.paper.id}
+              key={generated?.paper.id ?? "preview-empty"}
               ref={previewContainerRef}
               onMouseDown={handleMouseDown}
               onMouseMove={handleMouseMove}
@@ -693,6 +996,46 @@ export function PaperGeneratorPage() {
                     })
                   }));
                   setGenerated({ ...generated, sets: newSets });
+                };
+
+                const handleSwapQuestion = async (qId: string, type: QuestionType) => {
+                  try {
+                    const currentIds = generated.sets[0].questions.map(q => q.id);
+                    const allAvailable = await getQuestions(profile!.school_id!, chapterIds);
+                    const replacements = allAvailable.filter(
+                      q => q.question_type === type &&
+                        selectedLevels.includes(resolveQuestionLevel(q.question_level)) &&
+                        !currentIds.includes(q.id)
+                    );
+
+                    if (replacements.length === 0) {
+                      toast("error", "No alternative questions available in the current pool. Please add more chapters or levels.");
+                      return;
+                    }
+
+                    const newQ = replacements[Math.floor(Math.random() * replacements.length)];
+                    const newSets = generated.sets.map(s => ({
+                      ...s,
+                      questions: s.questions.map(q => {
+                        if (q.id === qId) {
+                          return {
+                            ...q,
+                            id: newQ.id,
+                            questionText: newQ.question_text,
+                            options: [newQ.option_a, newQ.option_b, newQ.option_c, newQ.option_d].filter(Boolean) as string[],
+                            correctAnswer: newQ.correct_answer,
+                            explanation: newQ.explanation
+                          };
+                        }
+                        return q;
+                      })
+                    }));
+                    setGenerated({ ...generated, sets: newSets });
+                    toast("success", "Question swapped successfully!");
+                  } catch (e) {
+                    console.error("Swap failed", e);
+                    toast("error", "Failed to swap question.");
+                  }
                 };
 
                 return (
@@ -845,8 +1188,16 @@ export function PaperGeneratorPage() {
                                 const emptyLines = q.emptyLines ?? sectionMeta?.emptyLines ?? 0;
 
                                 return (
-                                  <div key={q.id} className="relative pl-8">
+                                  <div key={q.id} className="relative pl-8 group/question">
                                     <span className="absolute left-0 font-bold">{qIndex + 1}.</span>
+                                    {/* Inline Swap Button */}
+                                    <button
+                                      onClick={() => handleSwapQuestion(q.id, q.questionType)}
+                                      className="absolute -left-8 top-1 opacity-0 group-hover/question:opacity-100 bg-brand/10 hover:bg-brand text-brand hover:text-white transition-all rounded p-1 shadow-sm tooltip"
+                                      title="Swap Question"
+                                    >
+                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m21 16-4 4-4-4" /><path d="M17 20V4" /><path d="m3 8 4-4 4 4" /><path d="M7 4v16" /></svg>
+                                    </button>
                                     <div className="flex-1">
                                       <p
                                         className="font-medium text-slate-800 leading-snug hover:bg-brand/10 focus:outline-none focus:bg-brand/10 transition-colors rounded px-1 -mx-1 cursor-text"
@@ -886,30 +1237,7 @@ export function PaperGeneratorPage() {
                               })}
                             </main>
 
-                            {/* Signature Footer */}
-                            <footer className="mt-8 pt-4 border-t border-slate-200">
-                              <div className="flex justify-between items-end gap-12">
-                                {header.signatureBlocks.map((sig, idx) => (
-                                  <div key={idx} className="flex-1 text-center font-bold text-[9px] uppercase tracking-tighter text-slate-400">
-                                    <div className="border-b border-slate-200 mb-1 h-6" />
-                                    <span
-                                      className="hover:bg-brand/10 hover:text-brand focus:text-brand focus:outline-none focus:bg-brand/10 transition-colors rounded px-1 -mx-1 cursor-text inline-block min-w-[50px]"
-                                      contentEditable suppressContentEditableWarning
-                                      onBlur={(e) => {
-                                        const newSigs = [...header.signatureBlocks];
-                                        newSigs[idx] = e.currentTarget.textContent || "SIGNATURE";
-                                        setHeader({ ...header, signatureBlocks: newSigs });
-                                      }}
-                                    >
-                                      {sig}
-                                    </span>
-                                  </div>
-                                ))}
-                              </div>
-                              <div className="mt-6 text-center text-[8px] font-black text-slate-300 uppercase tracking-[0.4em]">
-                                *** End of Paper ***
-                              </div>
-                            </footer>
+                            {/* Footer intentionally removed to align with export styling */}
                           </div>
                         ))}
                       </div>

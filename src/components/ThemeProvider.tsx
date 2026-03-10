@@ -15,8 +15,10 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
                     ? "dark"
                     : "light";
                 root.classList.add(systemTheme);
+                root.style.colorScheme = systemTheme;
             } else {
                 root.classList.add(theme);
+                root.style.colorScheme = theme;
             }
         }
 
