@@ -6,8 +6,10 @@ import {
   getContentSources,
   getGenerationCandidates,
   getGenerationJobs,
+  getSubscriptionSummary,
   getTopics,
   queueGenerationJob,
+  assertCanGenerateArtifact,
   reviewGenerationCandidate,
 } from "@/services/repositories";
 import { hasSupabase, supabase } from "@/services/supabase";
@@ -73,6 +75,7 @@ export function ContentPipelinePage() {
 
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<string[]>([]);
   const [publishing, setPublishing] = useState(false);
+  const [subscriptionSummary, setSubscriptionSummary] = useState<Awaited<ReturnType<typeof getSubscriptionSummary>> | null>(null);
 
   useEffect(() => {
     if (!chapterId) {
@@ -91,6 +94,39 @@ export function ContentPipelinePage() {
       setTopicId("");
     }
   }, [topics, topicId]);
+
+  useEffect(() => {
+    async function loadSubscription() {
+      if (!profile?.school_id) {
+        setSubscriptionSummary(null);
+        return;
+      }
+      try {
+        const summary = await getSubscriptionSummary(profile.school_id);
+        setSubscriptionSummary(summary);
+      } catch (error) {
+        console.error("Failed to load subscription summary", error);
+      }
+    }
+    loadSubscription();
+  }, [profile?.school_id]);
+
+  const worksheetLocked = subscriptionSummary ? !subscriptionSummary.canGenerateWorksheets : false;
+  const lessonPlanLocked = subscriptionSummary ? !subscriptionSummary.canGenerateLessonPlans : false;
+  const pipelineBlocked = subscriptionSummary ? !subscriptionSummary.isActive : false;
+  const artifactLocked =
+    (artifact === "worksheet" && worksheetLocked) ||
+    (artifact === "lesson_plan" && lessonPlanLocked);
+
+  useEffect(() => {
+    if (artifact === "worksheet" && worksheetLocked) {
+      setArtifact("question");
+      return;
+    }
+    if (artifact === "lesson_plan" && lessonPlanLocked) {
+      setArtifact("question");
+    }
+  }, [artifact, worksheetLocked, lessonPlanLocked]);
 
   const jobsById = useMemo(() => new Map(jobs.map((job) => [job.id, job])), [jobs]);
   const contextCandidates = useMemo(
@@ -210,6 +246,13 @@ export function ContentPipelinePage() {
       toast("error", "Select exam body, class, subject, and chapter first");
       return;
     }
+    try {
+      const summary = await assertCanGenerateArtifact(profile.school_id, artifact);
+      setSubscriptionSummary(summary);
+    } catch (error) {
+      toast("error", error instanceof Error ? error.message : "Artifact generation blocked by subscription.");
+      return;
+    }
     setQueueingJob(true);
     try {
       const requestJson =
@@ -312,6 +355,16 @@ export function ContentPipelinePage() {
         <p className="text-sm text-slate-500 dark:text-slate-400">
           Upload chapter files, run AI generation jobs, review candidates, and publish into question bank/worksheet/lesson plan modules.
         </p>
+        {subscriptionSummary && (
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+            <span className={`rounded-full px-2.5 py-1 font-bold ${subscriptionSummary.isActive ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
+              {subscriptionSummary.isActive ? "Subscription Active" : "Subscription Inactive"}
+            </span>
+            <span className="rounded-full bg-brand/10 text-brand px-2.5 py-1 font-bold">{subscriptionSummary.plan.name} Plan</span>
+            {worksheetLocked && <span className="text-slate-500">Worksheets locked</span>}
+            {lessonPlanLocked && <span className="text-slate-500">Lesson plans locked</span>}
+          </div>
+        )}
       </div>
 
       <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-4">
@@ -398,8 +451,8 @@ export function ContentPipelinePage() {
               Artifact
               <select className="mt-1 w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2" value={artifact} onChange={(e) => setArtifact(e.target.value as ArtifactType)}>
                 <option value="question">Question</option>
-                <option value="worksheet">Worksheet</option>
-                <option value="lesson_plan">Lesson Plan</option>
+                <option value="worksheet" disabled={worksheetLocked}>Worksheet{worksheetLocked ? " (Advanced)" : ""}</option>
+                <option value="lesson_plan" disabled={lessonPlanLocked}>Lesson Plan{lessonPlanLocked ? " (Advanced)" : ""}</option>
               </select>
             </label>
             <label className="text-xs font-semibold text-slate-600 dark:text-slate-300">
@@ -436,13 +489,19 @@ export function ContentPipelinePage() {
             <textarea className="mt-1 w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 h-20" value={instructions} onChange={(e) => setInstructions(e.target.value)} />
           </label>
           <div className="flex gap-2">
-            <button type="button" onClick={onQueueJob} disabled={queueingJob || !chapterId} className="rounded-lg bg-brand px-4 py-2 text-white font-semibold disabled:opacity-60">
+            <button type="button" onClick={onQueueJob} disabled={pipelineBlocked || artifactLocked || queueingJob || !chapterId} className="rounded-lg bg-brand px-4 py-2 text-white font-semibold disabled:opacity-60">
               {queueingJob ? "Queueing..." : "Queue Job"}
             </button>
-            <button type="button" onClick={onRunJobs} disabled={runningJobs || !chapterId} className="rounded-lg border border-slate-300 dark:border-slate-700 px-4 py-2 font-semibold text-slate-700 dark:text-slate-200 disabled:opacity-60">
+            <button type="button" onClick={onRunJobs} disabled={pipelineBlocked || runningJobs || !chapterId} className="rounded-lg border border-slate-300 dark:border-slate-700 px-4 py-2 font-semibold text-slate-700 dark:text-slate-200 disabled:opacity-60">
               {runningJobs ? "Running..." : "Run Queued Now"}
             </button>
           </div>
+          {pipelineBlocked && (
+            <p className="text-xs text-rose-600 font-semibold">Subscription inactive. Renew to queue and run jobs.</p>
+          )}
+          {!pipelineBlocked && artifactLocked && (
+            <p className="text-xs text-brand font-semibold">Selected artifact requires Advanced plan.</p>
+          )}
         </div>
       </div>
 

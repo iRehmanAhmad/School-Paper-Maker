@@ -1,6 +1,7 @@
-import React, { useState, useRef } from "react";
-import { getAISettings, saveAISettings, type AIProvider } from "@/services/aiSettings";
+import React, { useEffect, useState } from "react";
+import { getAISettings, getSchoolAISettings, saveSchoolAISettings, type AIProvider } from "@/services/aiSettings";
 import { getAppSettings, saveAppSettings } from "@/services/appSettings";
+import { changeMyPassword } from "@/services/repositories";
 import { hasSupabase } from "@/services/supabase";
 import { useAppStore } from "@/store/useAppStore";
 
@@ -9,6 +10,31 @@ export function SettingsPage() {
   const toast = useAppStore((s) => s.pushToast);
   const [ai, setAi] = useState(getAISettings());
   const [appSettings, setAppSettings] = useState(getAppSettings());
+  const [loadingCloudAI, setLoadingCloudAI] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [passwordCurrent, setPasswordCurrent] = useState("");
+  const [passwordNext, setPasswordNext] = useState("");
+  const [passwordConfirm, setPasswordConfirm] = useState("");
+  const [changingPassword, setChangingPassword] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    async function loadCloudSettings() {
+      if (!profile?.school_id || !hasSupabase) return;
+      setLoadingCloudAI(true);
+      try {
+        const cloudSettings = await getSchoolAISettings(profile.school_id);
+        if (!active) return;
+        setAi(cloudSettings);
+      } finally {
+        if (active) setLoadingCloudAI(false);
+      }
+    }
+    void loadCloudSettings();
+    return () => {
+      active = false;
+    };
+  }, [profile?.school_id]);
 
   const applyThemePreview = (theme: "light" | "dark" | "system") => {
     const root = window.document.documentElement;
@@ -41,11 +67,59 @@ export function SettingsPage() {
     }
   };
 
-  function saveAll() {
-    saveAISettings(ai);
-    saveAppSettings(appSettings);
-    window.dispatchEvent(new CustomEvent("app-settings-updated"));
-    toast("success", "Settings saved successfully");
+  async function saveAll() {
+    setSaving(true);
+    try {
+      await saveSchoolAISettings(profile?.school_id, ai, profile?.id);
+      saveAppSettings(appSettings);
+      window.dispatchEvent(new CustomEvent("app-settings-updated"));
+      if (hasSupabase && profile?.school_id) {
+        toast("success", "Settings saved locally and to cloud");
+      } else {
+        toast("success", "Settings saved locally");
+      }
+    } catch (error) {
+      saveAppSettings(appSettings);
+      window.dispatchEvent(new CustomEvent("app-settings-updated"));
+      toast("error", error instanceof Error ? error.message : "Saved locally, cloud save failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function updatePassword() {
+    if (!profile?.id) {
+      toast("error", "No active user");
+      return;
+    }
+    if (!passwordCurrent || !passwordNext || !passwordConfirm) {
+      toast("error", "Fill all password fields");
+      return;
+    }
+    if (passwordNext.length < 6) {
+      toast("error", "New password must be at least 6 characters");
+      return;
+    }
+    if (passwordNext !== passwordConfirm) {
+      toast("error", "New password and confirm password do not match");
+      return;
+    }
+    setChangingPassword(true);
+    try {
+      await changeMyPassword({
+        userId: profile.id,
+        currentPassword: passwordCurrent,
+        nextPassword: passwordNext,
+      });
+      setPasswordCurrent("");
+      setPasswordNext("");
+      setPasswordConfirm("");
+      toast("success", "Password updated");
+    } catch (error) {
+      toast("error", error instanceof Error ? error.message : "Password update failed");
+    } finally {
+      setChangingPassword(false);
+    }
   }
 
   const modelPresets: Record<AIProvider, string> = {
@@ -81,6 +155,9 @@ export function SettingsPage() {
           {hasSupabase ? "Cloud Sync Active" : "Local Demo Mode"}
         </span>
       </div>
+      {loadingCloudAI && (
+        <div className="text-xs font-semibold text-brand">Loading cloud AI settings...</div>
+      )}
 
       <div className="grid gap-6 md:grid-cols-2">
         <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-card p-6 shadow-sm">
@@ -149,6 +226,38 @@ export function SettingsPage() {
                 {profile?.role} Access
               </span>
             </div>
+            <div className="mt-4 space-y-2 border-t border-slate-100 pt-4 dark:border-slate-800">
+              <p className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Change Password</p>
+              <input
+                type="password"
+                className="w-full rounded-xl border border-slate-300 px-3 py-2 outline-none focus:border-brand dark:border-slate-700 dark:bg-slate-900/50"
+                placeholder="Current password"
+                value={passwordCurrent}
+                onChange={(e) => setPasswordCurrent(e.target.value)}
+              />
+              <input
+                type="password"
+                className="w-full rounded-xl border border-slate-300 px-3 py-2 outline-none focus:border-brand dark:border-slate-700 dark:bg-slate-900/50"
+                placeholder="New password"
+                value={passwordNext}
+                onChange={(e) => setPasswordNext(e.target.value)}
+              />
+              <input
+                type="password"
+                className="w-full rounded-xl border border-slate-300 px-3 py-2 outline-none focus:border-brand dark:border-slate-700 dark:bg-slate-900/50"
+                placeholder="Confirm new password"
+                value={passwordConfirm}
+                onChange={(e) => setPasswordConfirm(e.target.value)}
+              />
+              <button
+                type="button"
+                onClick={() => void updatePassword()}
+                disabled={changingPassword}
+                className="w-full rounded-xl bg-brand px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
+              >
+                {changingPassword ? "Updating..." : "Update Password"}
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -159,8 +268,12 @@ export function SettingsPage() {
             <h3 className="text-xl font-bold text-ink">Appearance & Paper Defaults</h3>
             <p className="mt-1 text-sm text-slate-500">Configure how the app looks and its default generation settings.</p>
           </div>
-          <button className="px-5 py-2 rounded-xl bg-brand text-white font-bold shadow-lg shadow-brand/20 hover:bg-brand/90 transition-all text-sm active:scale-95" onClick={saveAll}>
-            Save Changes
+          <button
+            className="px-5 py-2 rounded-xl bg-brand text-white font-bold shadow-lg shadow-brand/20 hover:bg-brand/90 transition-all text-sm active:scale-95 disabled:opacity-60 disabled:cursor-not-allowed"
+            onClick={() => void saveAll()}
+            disabled={saving}
+          >
+            {saving ? "Saving..." : "Save Changes"}
           </button>
         </div>
 
@@ -299,9 +412,15 @@ export function SettingsPage() {
           </div>
 
           <div className="mt-8 flex items-center justify-between border-t border-slate-100 dark:border-slate-800 pt-6">
-            <p className="text-xs text-slate-500 italic">Configuration is encrypted locally in your engine.</p>
-            <button className="px-8 py-3 rounded-xl bg-brand text-white font-bold shadow-lg shadow-brand/20 hover:scale-[1.02] active:scale-[0.98] transition-all" onClick={saveAll}>
-              Save All Settings
+            <p className="text-xs text-slate-500 italic">
+              Keys save locally and sync to your school cloud profile when Supabase is connected.
+            </p>
+            <button
+              className="px-8 py-3 rounded-xl bg-brand text-white font-bold shadow-lg shadow-brand/20 hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+              onClick={() => void saveAll()}
+              disabled={saving}
+            >
+              {saving ? "Saving..." : "Save All Settings"}
             </button>
           </div>
         </div>

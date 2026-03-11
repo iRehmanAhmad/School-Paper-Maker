@@ -14,6 +14,7 @@ import { QuestionBankPage } from "@/pages/QuestionBankPage";
 import { ContentPipelinePage } from "@/pages/ContentPipelinePage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { SubjectsPage } from "@/pages/SubjectsPage";
+import { SubscriptionsPage } from "@/pages/SubscriptionsPage";
 import { TemplatesPage } from "@/pages/TemplatesPage";
 import { ThemeProvider } from "@/components/ThemeProvider";
 
@@ -72,7 +73,7 @@ function ToastHost() {
 export default function App() {
   return (
     <ThemeProvider>
-      <BrowserRouter>
+      <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <ToastHost />
         <Routes>
           <Route path="/login" element={<LoginPage />} />
@@ -131,6 +132,14 @@ export default function App() {
               element={
                 <AdminRoute>
                   <BlueprintsPage />
+                </AdminRoute>
+              }
+            />
+            <Route
+              path="subscriptions"
+              element={
+                <AdminRoute>
+                  <SubscriptionsPage />
                 </AdminRoute>
               }
             />

@@ -24,6 +24,44 @@ type JobRow = {
   artifact: "question" | "worksheet" | "lesson_plan";
   request_json: Record<string, unknown>;
   attempts: number;
+  provider?: string | null;
+  model?: string | null;
+};
+
+type SchoolAISettingsRow = {
+  school_id: string;
+  provider: string | null;
+  model: string | null;
+  openai_api_key: string | null;
+  groq_api_key: string | null;
+  openrouter_api_key: string | null;
+  together_api_key: string | null;
+  gemini_api_key: string | null;
+  deepseek_api_key: string | null;
+  anthropic_api_key: string | null;
+};
+
+type SubscriptionPlanRow = {
+  id: string;
+  code: "basic" | "advanced";
+  name: string;
+  max_paper_sets: number;
+  allow_worksheets: boolean;
+  allow_lesson_plans: boolean;
+};
+
+type SubscriptionRow = {
+  school_id: string;
+  plan_id: string;
+  status: "active" | "expired" | "suspended";
+  starts_at: string;
+  ends_at: string;
+};
+
+type SchoolAccess = {
+  isActive: boolean;
+  allowWorksheets: boolean;
+  allowLessonPlans: boolean;
 };
 
 function cleanJsonText(text: string) {
@@ -42,10 +80,55 @@ function compactText(content: string) {
   return content.replace(/\s+/g, " ").trim();
 }
 
-async function callGemini(prompt: string) {
-  const apiKey = Deno.env.get("GEMINI_API_KEY");
+function defaultBasicAccess(): SchoolAccess {
+  return {
+    isActive: true,
+    allowWorksheets: false,
+    allowLessonPlans: false,
+  };
+}
+
+function isSubscriptionActive(status: string, endsAt: string) {
+  if (status !== "active") return false;
+  return new Date(endsAt).getTime() >= Date.now();
+}
+
+async function getSchoolAccess(admin: ReturnType<typeof createClient>, schoolId: string): Promise<SchoolAccess> {
+  try {
+    const { data: subscription, error: subError } = await admin
+      .from("subscriptions")
+      .select("*")
+      .eq("school_id", schoolId)
+      .maybeSingle();
+    if (subError) throw subError;
+    if (!subscription) {
+      return defaultBasicAccess();
+    }
+    const sub = subscription as SubscriptionRow;
+    const { data: plan, error: planError } = await admin
+      .from("subscription_plans")
+      .select("*")
+      .eq("id", sub.plan_id)
+      .maybeSingle();
+    if (planError) throw planError;
+    const resolvedPlan = (plan as SubscriptionPlanRow | null) || null;
+    return {
+      isActive: isSubscriptionActive(sub.status, sub.ends_at),
+      allowWorksheets: Boolean(resolvedPlan?.allow_worksheets),
+      allowLessonPlans: Boolean(resolvedPlan?.allow_lesson_plans),
+    };
+  } catch {
+    // Keep legacy behavior if subscription tables are not available yet.
+    return {
+      isActive: true,
+      allowWorksheets: true,
+      allowLessonPlans: true,
+    };
+  }
+}
+
+async function callGemini(apiKey: string, model: string, prompt: string) {
   if (!apiKey) return null;
-  const model = Deno.env.get("GEMINI_MODEL") || "gemini-1.5-flash";
   const response = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
     {
@@ -80,29 +163,133 @@ async function callOpenAICompatible(baseUrl: string, apiKey: string, model: stri
   return String(data?.choices?.[0]?.message?.content || "");
 }
 
-async function callProvider(prompt: string) {
-  const gemini = await callGemini(prompt);
-  if (gemini) return gemini;
+async function callAnthropic(apiKey: string, model: string, prompt: string) {
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 1800,
+      temperature: 0.25,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+  if (!response.ok) return null;
+  const data = await response.json();
+  const chunks = Array.isArray(data?.content) ? data.content : [];
+  const firstText = chunks.find((entry: { type?: string; text?: string }) => entry?.type === "text")?.text;
+  return typeof firstText === "string" ? firstText : null;
+}
 
-  const groqKey = Deno.env.get("GROQ_API_KEY");
-  if (groqKey) {
-    const text = await callOpenAICompatible(
-      "https://api.groq.com/openai/v1/chat/completions",
-      groqKey,
-      Deno.env.get("GROQ_MODEL") || "llama-3.3-70b-versatile",
-      prompt,
-    );
-    if (text) return text;
+const PROVIDERS = ["gemini", "groq", "openrouter", "together", "deepseek", "openai", "anthropic"] as const;
+type ProviderName = typeof PROVIDERS[number];
+
+const DEFAULT_MODELS: Record<ProviderName, string> = {
+  gemini: "gemini-1.5-flash",
+  groq: "llama-3.3-70b-versatile",
+  openrouter: "meta-llama/llama-3.3-70b-instruct:free",
+  together: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+  deepseek: "deepseek-chat",
+  openai: "gpt-4o-mini",
+  anthropic: "claude-3-5-sonnet-20240620",
+};
+
+function normalizeProvider(value: unknown): ProviderName | null {
+  const raw = String(value || "").trim().toLowerCase();
+  return (PROVIDERS as readonly string[]).includes(raw) ? (raw as ProviderName) : null;
+}
+
+function getPreferredProviderOrder(preferred?: string | null, fallback?: string | null) {
+  const first = normalizeProvider(preferred);
+  const second = normalizeProvider(fallback);
+  const ordered: ProviderName[] = [];
+  if (first) ordered.push(first);
+  if (second && second !== first) ordered.push(second);
+  for (const provider of PROVIDERS) {
+    if (!ordered.includes(provider)) ordered.push(provider);
   }
+  return ordered;
+}
 
-  const openaiKey = Deno.env.get("OPENAI_API_KEY");
-  if (openaiKey) {
-    const text = await callOpenAICompatible(
-      "https://api.openai.com/v1/chat/completions",
-      openaiKey,
-      Deno.env.get("OPENAI_MODEL") || "gpt-4o-mini",
-      prompt,
-    );
+function pickProviderApiKey(provider: ProviderName, schoolAI: SchoolAISettingsRow | null) {
+  if (provider === "gemini") return schoolAI?.gemini_api_key || Deno.env.get("GEMINI_API_KEY") || "";
+  if (provider === "groq") return schoolAI?.groq_api_key || Deno.env.get("GROQ_API_KEY") || "";
+  if (provider === "openrouter") return schoolAI?.openrouter_api_key || Deno.env.get("OPENROUTER_API_KEY") || "";
+  if (provider === "together") return schoolAI?.together_api_key || Deno.env.get("TOGETHER_API_KEY") || "";
+  if (provider === "deepseek") return schoolAI?.deepseek_api_key || Deno.env.get("DEEPSEEK_API_KEY") || "";
+  if (provider === "anthropic") return schoolAI?.anthropic_api_key || Deno.env.get("ANTHROPIC_API_KEY") || "";
+  return schoolAI?.openai_api_key || Deno.env.get("OPENAI_API_KEY") || "";
+}
+
+function pickProviderModel(
+  provider: ProviderName,
+  preferredProvider: string | null | undefined,
+  preferredModel: string | null | undefined,
+  schoolAI: SchoolAISettingsRow | null,
+) {
+  const normalizedPreferred = normalizeProvider(preferredProvider);
+  if (normalizedPreferred === provider && preferredModel) {
+    return preferredModel;
+  }
+  const schoolProvider = normalizeProvider(schoolAI?.provider || null);
+  if (schoolProvider === provider && schoolAI?.model) {
+    return schoolAI.model;
+  }
+  if (provider === "gemini") return Deno.env.get("GEMINI_MODEL") || DEFAULT_MODELS.gemini;
+  if (provider === "groq") return Deno.env.get("GROQ_MODEL") || DEFAULT_MODELS.groq;
+  if (provider === "openrouter") return Deno.env.get("OPENROUTER_MODEL") || DEFAULT_MODELS.openrouter;
+  if (provider === "together") return Deno.env.get("TOGETHER_MODEL") || DEFAULT_MODELS.together;
+  if (provider === "deepseek") return Deno.env.get("DEEPSEEK_MODEL") || DEFAULT_MODELS.deepseek;
+  if (provider === "anthropic") return Deno.env.get("ANTHROPIC_MODEL") || DEFAULT_MODELS.anthropic;
+  return Deno.env.get("OPENAI_MODEL") || DEFAULT_MODELS.openai;
+}
+
+async function callProvider(
+  prompt: string,
+  schoolAI: SchoolAISettingsRow | null,
+  preferredProvider?: string | null,
+  preferredModel?: string | null,
+) {
+  const order = getPreferredProviderOrder(preferredProvider, schoolAI?.provider || null);
+  for (const provider of order) {
+    const apiKey = pickProviderApiKey(provider, schoolAI);
+    if (!apiKey) continue;
+    const model = pickProviderModel(provider, preferredProvider, preferredModel, schoolAI);
+    if (provider === "gemini") {
+      const text = await callGemini(apiKey, model, prompt);
+      if (text) return text;
+      continue;
+    }
+    if (provider === "groq") {
+      const text = await callOpenAICompatible("https://api.groq.com/openai/v1/chat/completions", apiKey, model, prompt);
+      if (text) return text;
+      continue;
+    }
+    if (provider === "openrouter") {
+      const text = await callOpenAICompatible("https://openrouter.ai/api/v1/chat/completions", apiKey, model, prompt);
+      if (text) return text;
+      continue;
+    }
+    if (provider === "together") {
+      const text = await callOpenAICompatible("https://api.together.xyz/v1/chat/completions", apiKey, model, prompt);
+      if (text) return text;
+      continue;
+    }
+    if (provider === "deepseek") {
+      const text = await callOpenAICompatible("https://api.deepseek.com/chat/completions", apiKey, model, prompt);
+      if (text) return text;
+      continue;
+    }
+    if (provider === "anthropic") {
+      const text = await callAnthropic(apiKey, model, prompt);
+      if (text) return text;
+      continue;
+    }
+    const text = await callOpenAICompatible("https://api.openai.com/v1/chat/completions", apiKey, model, prompt);
     if (text) return text;
   }
 
@@ -242,6 +429,8 @@ Deno.serve(async (req) => {
     }
 
     const jobs = (jobsData || []) as JobRow[];
+    const schoolAiCache = new Map<string, SchoolAISettingsRow | null>();
+    const schoolAccessCache = new Map<string, SchoolAccess>();
     const details: Array<{ job_id: string; status: "completed" | "failed"; candidate_count?: number; error?: string }> = [];
     let completed = 0;
     let failed = 0;
@@ -249,6 +438,37 @@ Deno.serve(async (req) => {
 
     for (const job of jobs) {
       try {
+        let schoolAI: SchoolAISettingsRow | null = null;
+        if (schoolAiCache.has(job.school_id)) {
+          schoolAI = schoolAiCache.get(job.school_id) || null;
+        } else {
+          const { data: aiRow, error: aiError } = await admin
+            .from("school_ai_settings")
+            .select("*")
+            .eq("school_id", job.school_id)
+            .maybeSingle();
+          if (!aiError && aiRow) {
+            schoolAI = aiRow as SchoolAISettingsRow;
+          }
+          schoolAiCache.set(job.school_id, schoolAI);
+        }
+        let schoolAccess: SchoolAccess;
+        if (schoolAccessCache.has(job.school_id)) {
+          schoolAccess = schoolAccessCache.get(job.school_id) as SchoolAccess;
+        } else {
+          schoolAccess = await getSchoolAccess(admin, job.school_id);
+          schoolAccessCache.set(job.school_id, schoolAccess);
+        }
+        if (!schoolAccess.isActive) {
+          throw new Error("Subscription inactive or expired for this school.");
+        }
+        if (job.artifact === "worksheet" && !schoolAccess.allowWorksheets) {
+          throw new Error("Worksheet generation is available on Advanced plan only.");
+        }
+        if (job.artifact === "lesson_plan" && !schoolAccess.allowLessonPlans) {
+          throw new Error("Lesson plan generation is available on Advanced plan only.");
+        }
+
         await admin
           .from("generation_jobs")
           .update({
@@ -279,10 +499,12 @@ Deno.serve(async (req) => {
             .slice(0, 20000),
         ) || "No extracted content available. Generate generic curriculum-aligned output.";
 
-        const prompt = buildPrompt(job, contextText);
-        const modelOutput = await callProvider(prompt);
-        const parsed = modelOutput ? safeParse(modelOutput) : null;
         const request = job.request_json || {};
+        const prompt = buildPrompt(job, contextText);
+        const preferredProvider = String(job.provider || request.provider || "").trim() || null;
+        const preferredModel = String(job.model || request.model || "").trim() || null;
+        const modelOutput = await callProvider(prompt, schoolAI, preferredProvider, preferredModel);
+        const parsed = modelOutput ? safeParse(modelOutput) : null;
         const count = Math.max(1, Math.min(Number(request.count || 5), 50));
 
         let payloads: Record<string, unknown>[] = [];

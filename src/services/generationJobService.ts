@@ -14,6 +14,7 @@ import type {
 import { DB, ensureSeed, readLocal, writeLocal } from "./baseService";
 import { addLessonPlanWithBlocks } from "./lessonPlanService";
 import { addQuestions } from "./questionService";
+import { assertCanGenerateArtifact } from "./subscriptionService";
 import { addWorksheetWithItems } from "./worksheetService";
 
 type GenerationJobFilters = {
@@ -119,6 +120,7 @@ export async function getGenerationJobs(schoolId: string, filters?: GenerationJo
 }
 
 export async function queueGenerationJob(input: QueueGenerationJobInput) {
+  await assertCanGenerateArtifact(input.school_id, input.artifact);
   if (hasSupabase && supabase) {
     const payload = {
       ...input,

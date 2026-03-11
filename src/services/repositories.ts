@@ -11,3 +11,6 @@ export * from "./contentService";
 export * from "./generationJobService";
 export * from "./worksheetService";
 export * from "./lessonPlanService";
+export * from "./subscriptionService";
+export * from "./paymentService";
+export * from "./auditLogService";

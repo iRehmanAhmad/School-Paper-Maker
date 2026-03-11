@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { Bar, Doughnut, Line } from "react-chartjs-2";
-import { ArcElement, BarElement, CategoryScale, Chart as ChartJS, Legend, LinearScale, LineElement, PointElement, Tooltip } from "chart.js";
+import { ArcElement, BarElement, CategoryScale, Chart as ChartJS, Filler, Legend, LinearScale, LineElement, PointElement, Tooltip } from "chart.js";
 import jsPDF from "jspdf";
 import * as XLSX from "xlsx";
 import { getChapters, getClasses, getPapersByTeacher, getQuestions, getSubjects } from "@/services/repositories";
 import { useAppStore } from "@/store/useAppStore";
 import type { ChapterEntity, Paper, Question, QuestionType, SubjectEntity } from "@/types/domain";
 
-ChartJS.register(ArcElement, BarElement, Tooltip, Legend, CategoryScale, LinearScale, LineElement, PointElement);
+ChartJS.register(ArcElement, BarElement, Tooltip, Legend, CategoryScale, LinearScale, LineElement, PointElement, Filler);
 
 const analyticsTypes: QuestionType[] = ["mcq", "true_false", "fill_blanks", "short", "long", "matching", "diagram"];
 const bloomsOrder = ["remember", "understand", "apply", "analyze", "evaluate", "unassigned"];

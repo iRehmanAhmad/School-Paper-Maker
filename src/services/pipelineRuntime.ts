@@ -6,6 +6,7 @@ import {
   updateContentSourceStatus,
   updateGenerationJob,
   addGenerationCandidates,
+  assertCanGenerateArtifact,
 } from "@/services/repositories";
 import type { ArtifactType, Difficulty, GenerationJob, QuestionType } from "@/types/domain";
 import { DB, readLocal } from "@/services/baseService";
@@ -173,6 +174,7 @@ export async function invokeRunGenerationJobs(input?: RunGenerationJobsInput): P
 
   for (const job of queued) {
     try {
+      await assertCanGenerateArtifact(job.school_id, job.artifact);
       await updateGenerationJob(job.id, {
         status: "running",
         started_at: new Date().toISOString(),

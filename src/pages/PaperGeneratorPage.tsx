@@ -13,6 +13,8 @@ import {
   getSubjects,
   savePaperAndUsage,
   getPaperBundleById,
+  getSubscriptionSummary,
+  assertCanGeneratePaper,
 } from "@/services/repositories";
 import { useAppStore } from "@/store/useAppStore";
 import { useSearchParams } from "react-router-dom";
@@ -100,6 +102,9 @@ export function PaperGeneratorPage() {
   const [selectedTopicIds, setSelectedTopicIds] = useState<string[]>([]);
   const [selectedLevels, setSelectedLevels] = useState<QuestionLevel[]>(["exercise"]);
   const [recentPapersToAvoid, setRecentPapersToAvoid] = useState(3);
+  const [requestedSets, setRequestedSets] = useState(1);
+  const [activeSetLabel, setActiveSetLabel] = useState("A");
+  const [subscriptionSummary, setSubscriptionSummary] = useState<Awaited<ReturnType<typeof getSubscriptionSummary>> | null>(null);
   const [previewScale, setPreviewScale] = useState(1.0);
   const previewContainerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(800);
@@ -131,6 +136,9 @@ export function PaperGeneratorPage() {
 
   const appSettings = getAppSettings();
   const subjectName = subjects.find(s => s.id === subjectId)?.name || "";
+  const activeSet = generated?.sets.find((setRow) => setRow.label === activeSetLabel) || generated?.sets[0];
+  const maxPlanSets = subscriptionSummary?.maxPaperSets ?? 1;
+  const isSubscriptionActive = subscriptionSummary?.isActive ?? true;
 
   const [header, setHeader] = useState<GeneratorSettings["header"]>({
     schoolName: appSettings.schoolName || (isPremium ? "ABC Public School" : "Antigravity Academic Engine"),
@@ -269,6 +277,35 @@ export function PaperGeneratorPage() {
     load();
   }, [profile?.school_id, examBodyId]);
 
+  useEffect(() => {
+    async function loadSubscription() {
+      if (!profile?.school_id) {
+        setSubscriptionSummary(null);
+        return;
+      }
+      try {
+        const summary = await getSubscriptionSummary(profile.school_id);
+        setSubscriptionSummary(summary);
+      } catch (error) {
+        console.error("Failed to load subscription summary", error);
+      }
+    }
+    loadSubscription();
+  }, [profile?.school_id]);
+
+  useEffect(() => {
+    if (!subscriptionSummary) return;
+    if (requestedSets > subscriptionSummary.maxPaperSets) {
+      setRequestedSets(subscriptionSummary.maxPaperSets);
+    }
+  }, [subscriptionSummary, requestedSets]);
+
+  useEffect(() => {
+    if (!generated?.sets?.length) return;
+    if (generated.sets.some((setRow) => setRow.label === activeSetLabel)) return;
+    setActiveSetLabel(generated.sets[0].label);
+  }, [generated, activeSetLabel]);
+
   // Load Saved Paper Workflow
   useEffect(() => {
     const loadId = searchParams.get("load");
@@ -287,9 +324,11 @@ export function PaperGeneratorPage() {
           setSelectedTopicIds(Array.isArray(settings.topicIds) ? settings.topicIds : []);
           setExamBodyId(settings.examBodyId || examBodyId);
           setSelectedLevels(settings.levels || ["exercise"]);
+          setRequestedSets(Math.max(1, Number(settings.sets || 1)));
           setHeader(settings.header);
 
           setGenerated(bundle);
+          setActiveSetLabel(bundle.sets?.[0]?.label || "A");
           setStep(4);
           toast("success", "Paper loaded from My Papers!");
         } else {
@@ -438,6 +477,15 @@ export function PaperGeneratorPage() {
       return false;
     }
 
+    const sanitizedSetCount = Math.max(1, Math.floor(requestedSets || 1));
+    try {
+      const summary = await assertCanGeneratePaper(profile.school_id, sanitizedSetCount);
+      setSubscriptionSummary(summary);
+    } catch (error) {
+      toast("error", error instanceof Error ? error.message : "Paper generation is blocked by subscription.");
+      return false;
+    }
+
     setIsGenerating(true);
     setGenerated(null); // Clear old paper to prevent stale previews/prints
 
@@ -476,7 +524,7 @@ export function PaperGeneratorPage() {
       chapterIds,
       topicIds: selectedTopicIds,
       examType: "monthly",
-      sets: 1,
+      sets: sanitizedSetCount,
       recentPapersToAvoid,
       difficultyDistribution,
       bloomDistribution,
@@ -502,12 +550,13 @@ export function PaperGeneratorPage() {
         sections: activeSections as any,
       });
 
-      if (bundle.sets[0].questions.length === 0) {
+      if (bundle.sets.every((setRow) => setRow.questions.length === 0)) {
         throw new Error("Could not find any questions matching your criteria. Check question types.");
       }
 
       await savePaperAndUsage(bundle.paper, mappings, usage);
       setGenerated(bundle);
+      setActiveSetLabel(bundle.sets[0]?.label || "A");
       toast("success", "Paper generated successfully!");
       return true;
     } catch (e: any) {
@@ -540,6 +589,19 @@ export function PaperGeneratorPage() {
         <div>
           <h2 className="font-display text-2xl font-bold bg-gradient-to-r from-brand to-brand/70 bg-clip-text text-transparent italic tracking-tight">Paper Constructor <span className="text-xs font-black uppercase text-brand/40 align-top opacity-50 tracking-widest ml-2">SaaS v2.0</span></h2>
           <p className="text-sm text-slate-500">Construct high-quality exam papers in minutes.</p>
+          {subscriptionSummary && (
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+              <span className={`rounded-full px-2.5 py-1 font-bold ${subscriptionSummary.isActive ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
+                {subscriptionSummary.isActive ? "Subscription Active" : "Subscription Inactive"}
+              </span>
+              <span className="rounded-full bg-brand/10 text-brand px-2.5 py-1 font-bold">
+                {subscriptionSummary.plan.name} Plan
+              </span>
+              <span className="text-slate-500">
+                Max sets: {subscriptionSummary.maxPaperSets}
+              </span>
+            </div>
+          )}
         </div>
 
         <div className="flex items-center gap-2 bg-white p-1 rounded-2xl border border-slate-200 shadow-sm">
@@ -953,11 +1015,37 @@ export function PaperGeneratorPage() {
                 </table>
               </div>
 
+              <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50/70 p-4 flex flex-wrap items-end gap-4">
+                <label className="text-xs font-black uppercase tracking-widest text-slate-500">
+                  Paper Variations (Sets)
+                  <input
+                    type="number"
+                    min={1}
+                    max={maxPlanSets}
+                    value={requestedSets}
+                    disabled={!isSubscriptionActive}
+                    onChange={(e) => {
+                      const next = Number(e.target.value);
+                      if (!Number.isFinite(next)) return;
+                      setRequestedSets(Math.max(1, Math.min(maxPlanSets, Math.floor(next))));
+                    }}
+                    className="mt-2 w-28 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-black text-slate-700 outline-none focus:border-brand disabled:opacity-60"
+                  />
+                </label>
+                <div className="text-xs text-slate-500 space-y-1">
+                  <div>Current plan allows up to <span className="font-black text-slate-700">{maxPlanSets}</span> variation(s).</div>
+                  {!isSubscriptionActive && <div className="text-rose-600 font-semibold">Subscription inactive. Renew plan to generate papers.</div>}
+                  {subscriptionSummary && subscriptionSummary.maxPaperSets === 1 && (
+                    <div className="text-brand font-semibold">Upgrade to Advanced for Set B/C variations.</div>
+                  )}
+                </div>
+              </div>
+
               <div className="mt-8 flex justify-between items-center bg-slate-50 -mx-8 -mb-8 px-8 py-8 rounded-b-3xl border-t border-slate-100">
                 <button onClick={() => setStep(2)} className="rounded-2xl px-6 py-3 font-bold text-slate-400 hover:bg-slate-200 transition-all text-xs uppercase tracking-widest">Back</button>
                 <div className="flex flex-col items-end gap-2">
                   <button
-                    disabled={isGenerating || composition.some(r => r.selected && r.count > (availableCounts[r.type] || 0))}
+                    disabled={!isSubscriptionActive || isGenerating || composition.some(r => r.selected && r.count > (availableCounts[r.type] || 0))}
                     onClick={async () => {
                       const success = await generate();
                       if (success) setStep(4);
@@ -1026,13 +1114,26 @@ export function PaperGeneratorPage() {
 
                 {/* Actions */}
                 <div className="flex flex-wrap items-center gap-2 lg:ml-auto w-full lg:w-auto justify-end border-t lg:border-t-0 border-slate-100 pt-3 lg:pt-0 mt-1 lg:mt-0">
-                  <button onClick={() => downloadAnswerPdf(generated!.sets[0], { ...generated!.paper.settings_json, header: { ...(generated!.paper.settings_json as any).header, ...header } } as any)} className="px-4 py-2 rounded-lg bg-white border border-slate-200 hover:border-brand hover:text-brand font-bold uppercase text-[10px] tracking-wide text-slate-600 transition-all shadow-sm">
+                  {generated && generated.sets.length > 1 && (
+                    <select
+                      className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-[10px] font-bold text-slate-700 outline-none focus:border-brand"
+                      value={activeSet?.label || ""}
+                      onChange={(e) => setActiveSetLabel(e.target.value)}
+                    >
+                      {generated.sets.map((setRow) => (
+                        <option key={setRow.label} value={setRow.label}>
+                          Set {setRow.label}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  <button onClick={() => activeSet && downloadAnswerPdf(activeSet, { ...generated!.paper.settings_json, header: { ...(generated!.paper.settings_json as any).header, ...header } } as any)} className="px-4 py-2 rounded-lg bg-white border border-slate-200 hover:border-brand hover:text-brand font-bold uppercase text-[10px] tracking-wide text-slate-600 transition-all shadow-sm">
                     Answer Key
                   </button>
-                  <button onClick={() => downloadQuestionDocx(generated!.sets[0], { ...generated!.paper.settings_json, header: { ...(generated!.paper.settings_json as any).header, ...header } } as any)} className="px-4 py-2 rounded-lg bg-[#2b579a] hover:bg-[#1e3e6d] text-white font-bold uppercase text-[10px] tracking-wide transition-all shadow-sm">
+                  <button onClick={() => activeSet && downloadQuestionDocx(activeSet, { ...generated!.paper.settings_json, header: { ...(generated!.paper.settings_json as any).header, ...header } } as any)} className="px-4 py-2 rounded-lg bg-[#2b579a] hover:bg-[#1e3e6d] text-white font-bold uppercase text-[10px] tracking-wide transition-all shadow-sm">
                     Word Docx
                   </button>
-                  <button onClick={() => openPrintableHtml(generated!.sets[0], { ...generated!.paper.settings_json, header: { ...(generated!.paper.settings_json as any).header, ...header } } as any)} className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-white font-bold uppercase text-[10px] tracking-wide transition-all shadow-sm">
+                  <button onClick={() => activeSet && openPrintableHtml(activeSet, { ...generated!.paper.settings_json, header: { ...(generated!.paper.settings_json as any).header, ...header } } as any)} className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-white font-bold uppercase text-[10px] tracking-wide transition-all shadow-sm">
                     PDF / Print
                   </button>
 
@@ -1105,7 +1206,7 @@ export function PaperGeneratorPage() {
 
                 const handleSwapQuestion = async (qId: string, type: QuestionType) => {
                   try {
-                    const currentIds = generated.sets[0].questions.map(q => q.id);
+                    const currentIds = (activeSet?.questions || []).map(q => q.id);
                     const allAvailable = await getQuestions(profile!.school_id!, chapterIds);
                     const replacements = allAvailable.filter(
                       q => q.question_type === type &&
@@ -1254,7 +1355,7 @@ export function PaperGeneratorPage() {
                                 </div>
                                 <div className="flex gap-2">
                                   <span className="w-28 text-slate-900">Maximum Marks:</span>
-                                  <span className="font-black">{generated.sets[0].totalMarks}</span>
+                                  <span className="font-black">{activeSet?.totalMarks ?? 0}</span>
                                 </div>
                               </div>
 
@@ -1289,7 +1390,7 @@ export function PaperGeneratorPage() {
 
                             {/* Flattened Question List - No Sections */}
                             <main className="flex-1 space-y-4 mt-2 relative z-10" style={{ lineHeight: header.lineHeight || 1.5 }}>
-                              {generated.sets[0].questions.map((q, qIndex) => {
+                              {(activeSet?.questions || []).map((q, qIndex) => {
                                 const sectionMeta = composition.find(r => r.type === q.questionType);
                                 const emptyLines = q.emptyLines ?? sectionMeta?.emptyLines ?? 0;
 

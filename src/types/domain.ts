@@ -8,11 +8,81 @@ export type ArtifactType = "question" | "worksheet" | "lesson_plan";
 export type IngestStatus = "uploaded" | "processing" | "ready" | "failed";
 export type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 export type CandidateStatus = "pending_review" | "approved" | "rejected" | "published";
+export type SubscriptionPlanCode = "basic" | "advanced";
+export type SubscriptionStatus = "pending_payment" | "active" | "expired" | "suspended" | "cancelled";
+export type PaymentProvider = "jazzcash" | "easypaisa" | "manual";
+export type PaymentIntentStatus = "pending" | "success" | "failed" | "expired" | "cancelled";
 
 export type School = {
   id: string;
   name: string;
   logo_url?: string | null;
+  created_at: string;
+};
+
+export type SubscriptionPlan = {
+  id: string;
+  code: SubscriptionPlanCode;
+  name: string;
+  description?: string | null;
+  max_paper_sets: number;
+  allow_worksheets: boolean;
+  allow_lesson_plans: boolean;
+  created_at: string;
+};
+
+export type Subscription = {
+  id: string;
+  school_id: string;
+  plan_id: string;
+  status: SubscriptionStatus;
+  starts_at: string;
+  ends_at: string;
+  payment_method?: PaymentProvider | null;
+  transaction_id?: string | null;
+  paid_at?: string | null;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PaymentIntent = {
+  id: string;
+  school_id: string;
+  subscription_id?: string | null;
+  provider: PaymentProvider;
+  amount_pkr: number;
+  status: PaymentIntentStatus;
+  merchant_txn_id: string;
+  provider_txn_id?: string | null;
+  payer_phone?: string | null;
+  notes?: string | null;
+  metadata?: Record<string, unknown> | null;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+  paid_at?: string | null;
+};
+
+export type PaymentEvent = {
+  id: string;
+  school_id: string;
+  payment_intent_id?: string | null;
+  event_type: string;
+  payload: Record<string, unknown>;
+  signature_valid?: boolean | null;
+  created_at: string;
+};
+
+export type AuditLog = {
+  id: string;
+  school_id?: string | null;
+  actor_id?: string | null;
+  actor_name?: string | null;
+  action: string;
+  target_type?: string | null;
+  target_id?: string | null;
+  details?: Record<string, unknown> | null;
   created_at: string;
 };
 
@@ -29,6 +99,8 @@ export type UserProfile = {
   role: UserRole;
   school_id: string | null;
   full_name: string;
+  // Local/demo auth password. In Supabase auth mode, password is handled by auth.users.
+  password?: string;
   is_premium?: boolean;
   created_at: string;
 };

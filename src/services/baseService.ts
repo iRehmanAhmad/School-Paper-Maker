@@ -1,4 +1,5 @@
 import type {
+  AuditLog,
   Blueprint,
   ContentChunk,
   ContentSource,
@@ -11,11 +12,15 @@ import type {
   LessonPlan,
   LessonPlanBlock,
   Paper,
+  PaymentEvent,
+  PaymentIntent,
   PaperTemplate,
   PaperQuestion,
   Question,
   QuestionUsage,
   School,
+  Subscription,
+  SubscriptionPlan,
   SubjectEntity,
   TopicEntity,
   UserProfile,
@@ -46,6 +51,11 @@ export const DB = {
   worksheetItems: "pg_worksheet_items",
   lessonPlans: "pg_lesson_plans",
   lessonPlanBlocks: "pg_lesson_plan_blocks",
+  subscriptionPlans: "pg_subscription_plans",
+  subscriptions: "pg_subscriptions",
+  paymentIntents: "pg_payment_intents",
+  paymentEvents: "pg_payment_events",
+  auditLogs: "pg_audit_logs",
 } as const;
 
 export type Key = (typeof DB)[keyof typeof DB];
@@ -413,10 +423,86 @@ function ensureScienceChapter2DummyQuestions() {
   }
 }
 
+function defaultPasswordForUser(user: Pick<UserProfile, "email" | "role">) {
+  const email = user.email.toLowerCase();
+  if (user.role === "admin" || email.includes("admin")) return "admin123";
+  if (email.includes("teacher")) return "teacher123";
+  return "client123";
+}
+
+function ensureUserPasswords() {
+  const users = readLocal<UserProfile>(DB.users);
+  if (!users.length) return;
+  let changed = false;
+  const next = users.map((user) => {
+    if (user.password && user.password.trim().length >= 6) {
+      return user;
+    }
+    changed = true;
+    return { ...user, password: defaultPasswordForUser(user) };
+  });
+  if (changed) {
+    writeLocal(DB.users, next);
+  }
+}
+
 export function ensureSeed() {
   const hasExisting = readLocal<School>(DB.schools).length > 0;
   const hasBodies = readLocal<ExamBody>(DB.examBodies).length > 0;
   if (hasExisting && hasBodies) {
+    if (!readLocal<SubscriptionPlan>(DB.subscriptionPlans).length) {
+      const now = new Date().toISOString();
+      writeLocal<SubscriptionPlan>(DB.subscriptionPlans, [
+        {
+          id: crypto.randomUUID(),
+          code: "basic",
+          name: "Basic",
+          description: "Unlimited papers, single variation only.",
+          max_paper_sets: 1,
+          allow_worksheets: false,
+          allow_lesson_plans: false,
+          created_at: now,
+        },
+        {
+          id: crypto.randomUUID(),
+          code: "advanced",
+          name: "Advanced",
+          description: "Multiple paper variations with worksheets and lesson plans.",
+          max_paper_sets: 10,
+          allow_worksheets: true,
+          allow_lesson_plans: true,
+          created_at: now,
+        },
+      ]);
+    }
+    if (!readLocal<Subscription>(DB.subscriptions).length) {
+      const plans = readLocal<SubscriptionPlan>(DB.subscriptionPlans);
+      const schoolId = readLocal<School>(DB.schools)[0]?.id;
+      const adminId = readLocal<UserProfile>(DB.users).find((u) => u.role === "admin")?.id || null;
+      const basic = plans.find((plan) => plan.code === "basic") || plans[0];
+      if (schoolId && basic) {
+        const startAt = new Date();
+        const endAt = new Date(startAt);
+        endAt.setMonth(endAt.getMonth() + 1);
+        writeLocal<Subscription>(DB.subscriptions, [
+          {
+            id: crypto.randomUUID(),
+            school_id: schoolId,
+            plan_id: basic.id,
+            status: "active",
+            starts_at: startAt.toISOString(),
+            ends_at: endAt.toISOString(),
+            created_by: adminId,
+            created_at: startAt.toISOString(),
+            updated_at: startAt.toISOString(),
+          },
+        ]);
+      }
+    }
+    if (!readLocal<AuditLog>(DB.auditLogs).length) {
+      writeLocal<AuditLog>(DB.auditLogs, []);
+    }
+    ensureUserPasswords();
     ensureTopicStructure();
     ensureScienceChapter2DummyQuestions();
     return;
@@ -451,8 +537,50 @@ export function ensureSeed() {
     { id: kpkBody, school_id: schoolId, name: "KPK Govt", created_at: now },
   ]);
   writeLocal<UserProfile>(DB.users, [
-    { id: crypto.randomUUID(), email: "admin@demo.school", role: "admin", school_id: schoolId, full_name: "Demo Admin", created_at: now },
-    { id: crypto.randomUUID(), email: "teacher@demo.school", role: "teacher", school_id: schoolId, full_name: "Demo Teacher", created_at: now },
+    { id: crypto.randomUUID(), email: "admin@demo.school", role: "admin", school_id: schoolId, full_name: "Demo Admin", password: "admin123", created_at: now },
+    { id: crypto.randomUUID(), email: "teacher@demo.school", role: "teacher", school_id: schoolId, full_name: "Demo Teacher", password: "teacher123", created_at: now },
+  ]);
+  const users = readLocal<UserProfile>(DB.users);
+  const adminUserId = users.find((user) => user.role === "admin")?.id || null;
+  const basicPlanId = crypto.randomUUID();
+  const advancedPlanId = crypto.randomUUID();
+  const startAt = new Date();
+  const endAt = new Date(startAt);
+  endAt.setMonth(endAt.getMonth() + 1);
+  writeLocal<SubscriptionPlan>(DB.subscriptionPlans, [
+    {
+      id: basicPlanId,
+      code: "basic",
+      name: "Basic",
+      description: "Unlimited papers, single variation only.",
+      max_paper_sets: 1,
+      allow_worksheets: false,
+      allow_lesson_plans: false,
+      created_at: now,
+    },
+    {
+      id: advancedPlanId,
+      code: "advanced",
+      name: "Advanced",
+      description: "Multiple paper variations with worksheets and lesson plans.",
+      max_paper_sets: 10,
+      allow_worksheets: true,
+      allow_lesson_plans: true,
+      created_at: now,
+    },
+  ]);
+  writeLocal<Subscription>(DB.subscriptions, [
+    {
+      id: crypto.randomUUID(),
+      school_id: schoolId,
+      plan_id: basicPlanId,
+      status: "active",
+      starts_at: startAt.toISOString(),
+      ends_at: endAt.toISOString(),
+      created_by: adminUserId,
+      created_at: now,
+      updated_at: now,
+    },
   ]);
   writeLocal<ClassEntity>(DB.classes, [
     { id: classPunjab5, school_id: schoolId, exam_body_id: punjabBody, name: "Class 5", created_at: now },
@@ -534,6 +662,9 @@ export function ensureSeed() {
   writeLocal<WorksheetItem>(DB.worksheetItems, []);
   writeLocal<LessonPlan>(DB.lessonPlans, []);
   writeLocal<LessonPlanBlock>(DB.lessonPlanBlocks, []);
+  writeLocal<PaymentIntent>(DB.paymentIntents, []);
+  writeLocal<PaymentEvent>(DB.paymentEvents, []);
+  writeLocal<AuditLog>(DB.auditLogs, []);
   ensureTopicStructure();
   ensureScienceChapter2DummyQuestions();
 }

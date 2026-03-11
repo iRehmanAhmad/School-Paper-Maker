@@ -1,7 +1,8 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useState, useCallback, useEffect } from "react";
 import { useAppStore } from "@/store/useAppStore";
-import { BookOpen, ChartPie, DatabaseZap, FileCog, FileOutput, Folder, GraduationCap, LayoutDashboard, ListChecks, LogOut, Settings, Shapes } from "lucide-react";
+import { getSubscriptionSummary } from "@/services/repositories";
+import { BookOpen, ChartPie, CreditCard, DatabaseZap, FileCog, FileOutput, Folder, GraduationCap, LayoutDashboard, ListChecks, LogOut, Settings, Shapes } from "lucide-react";
 
 const adminNav = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -10,6 +11,7 @@ const adminNav = [
   { to: "/subjects", label: "Add Subject", icon: BookOpen },
   { to: "/chapters", label: "Add Chapter", icon: Folder },
   { to: "/question-bank", label: "Add Questions", icon: ListChecks },
+  { to: "/subscriptions", label: "Subscriptions", icon: CreditCard },
   { to: "/content-pipeline", label: "Content Pipeline", icon: DatabaseZap },
   { to: "/blueprints", label: "Blueprints", icon: FileCog },
   { to: "/analytics", label: "Analytics", icon: ChartPie },
@@ -28,6 +30,25 @@ export function AppLayout() {
   const profile = useAppStore((s) => s.profile);
   const setProfile = useAppStore((s) => s.setProfile);
   const navigate = useNavigate();
+  const [planLabel, setPlanLabel] = useState<string>("");
+  const [planActive, setPlanActive] = useState<boolean>(true);
+
+  useEffect(() => {
+    async function loadSummary() {
+      if (!profile?.school_id) {
+        setPlanLabel("");
+        return;
+      }
+      try {
+        const summary = await getSubscriptionSummary(profile.school_id);
+        setPlanLabel(summary.plan.name);
+        setPlanActive(summary.isActive);
+      } catch {
+        setPlanLabel("");
+      }
+    }
+    loadSummary();
+  }, [profile?.school_id]);
 
   function logout() {
     setProfile(null);
@@ -45,6 +66,11 @@ export function AppLayout() {
           <div className="mt-4 rounded-xl bg-bg dark:bg-slate-800/50 p-3 text-sm">
             <p className="font-semibold text-ink">{profile?.full_name ?? "Guest"}</p>
             <p className="text-slate-500 dark:text-slate-400">{profile?.role ?? "teacher"}</p>
+            {planLabel && (
+              <p className={`mt-2 inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${planActive ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
+                {planLabel} {planActive ? "Active" : "Inactive"}
+              </p>
+            )}
           </div>
           <nav className="mt-4 space-y-1">
             {navItems.map((item) => {

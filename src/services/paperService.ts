@@ -1,12 +1,31 @@
 import { hasSupabase, supabase } from "@/services/supabase";
-import type { Paper, PaperQuestion, QuestionUsage, Blueprint, PaperTemplate } from "@/types/domain";
+import type { Paper, PaperQuestion, QuestionUsage, Blueprint, PaperTemplate, ClassEntity } from "@/types/domain";
 import { DB, ensureSeed, readLocal, writeLocal } from "./baseService";
 import { getQuestions } from "./questionService";
 import { getClasses } from "./classService";
 import { getSubjects } from "./subjectService";
 import { getChapters } from "./chapterService";
+import { assertCanGeneratePaper } from "./subscriptionService";
+
+async function getSchoolIdForPaperClass(classId: string) {
+    if (hasSupabase && supabase) {
+        const { data, error } = await supabase.from("classes").select("school_id").eq("id", classId).maybeSingle();
+        if (error) {
+            throw error;
+        }
+        return (data?.school_id as string | null) || null;
+    }
+    ensureSeed();
+    const row = readLocal<ClassEntity>(DB.classes).find((item) => item.id === classId);
+    return row?.school_id || null;
+}
 
 export async function savePaperAndUsage(paper: Paper, mappings: PaperQuestion[], usage: QuestionUsage[]) {
+    const schoolId = await getSchoolIdForPaperClass(paper.class_id);
+    if (schoolId) {
+        const requestedSets = Math.max(1, Number((paper.settings_json as any)?.sets || 1));
+        await assertCanGeneratePaper(schoolId, requestedSets);
+    }
     if (hasSupabase && supabase) {
         const { error: paperErr } = await supabase.from("papers").insert(paper);
         if (paperErr) {

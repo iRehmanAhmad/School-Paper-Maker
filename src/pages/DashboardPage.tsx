@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Bar, Doughnut, Line } from "react-chartjs-2";
-import { ArcElement, CategoryScale, Chart as ChartJS, Legend, LinearScale, BarElement, Tooltip, LineElement, PointElement } from "chart.js";
+import { ArcElement, CategoryScale, Chart as ChartJS, Filler, Legend, LinearScale, BarElement, Tooltip, LineElement, PointElement } from "chart.js";
 import { ArrowDownRight, ArrowUpRight, BookCheck, BookOpen, FileText, FolderPlus, Layers3, Sparkles, WandSparkles } from "lucide-react";
 import { getChapters, getClasses, getPapersByTeacher, getQuestions, getStats, getSubjects } from "@/services/repositories";
 import { useAppStore } from "@/store/useAppStore";
 import type { ChapterEntity, ClassEntity, Paper, Question, SubjectEntity } from "@/types/domain";
 
-ChartJS.register(ArcElement, CategoryScale, LinearScale, BarElement, Tooltip, Legend, LineElement, PointElement);
+ChartJS.register(ArcElement, CategoryScale, LinearScale, BarElement, Tooltip, Legend, LineElement, PointElement, Filler);
 
 type DashboardStats = {
   totalQuestions: number;
