@@ -82,6 +82,37 @@ Alternative: You can also set client-side provider keys in Settings for:
 - OpenAI
 The app will try selected provider first, then Supabase fallback, then mock mode.
 
+## Content Pipeline Setup (Sources -> Jobs -> Review -> Publish)
+1. Run migration:
+```bash
+supabase db push
+```
+or execute:
+```sql
+supabase/migrations/20260311_content_pipeline.sql
+```
+2. Deploy pipeline functions:
+```bash
+supabase functions deploy ingest-source --no-verify-jwt
+supabase functions deploy run-generation-jobs --no-verify-jwt
+supabase functions deploy publish-candidates --no-verify-jwt
+```
+3. Optional provider secrets for server-side generation:
+```bash
+supabase secrets set GEMINI_API_KEY=your_key
+supabase secrets set GEMINI_MODEL=gemini-1.5-flash
+supabase secrets set GROQ_API_KEY=your_key
+supabase secrets set GROQ_MODEL=llama-3.3-70b-versatile
+supabase secrets set OPENAI_API_KEY=your_key
+supabase secrets set OPENAI_MODEL=gpt-4o-mini
+```
+4. In admin, open `Content Pipeline`:
+- upload chapter/topic source files
+- click `Ingest` to create chunks
+- queue and run generation jobs
+- review candidates and publish approved ones
+- use `Import Approved` in Add Questions to pull approved question candidates
+
 ## GitHub Pages Deployment
 1. Set `VITE_BASE_PATH` in env to your repo base path, e.g. `/paper-generator/`.
 2. Build and deploy:

@@ -11,6 +11,7 @@ import { ExamBodiesPage } from "@/pages/ExamBodiesPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { PaperGeneratorPage } from "@/pages/PaperGeneratorPage";
 import { QuestionBankPage } from "@/pages/QuestionBankPage";
+import { ContentPipelinePage } from "@/pages/ContentPipelinePage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { SubjectsPage } from "@/pages/SubjectsPage";
 import { TemplatesPage } from "@/pages/TemplatesPage";
@@ -130,6 +131,14 @@ export default function App() {
               element={
                 <AdminRoute>
                   <BlueprintsPage />
+                </AdminRoute>
+              }
+            />
+            <Route
+              path="content-pipeline"
+              element={
+                <AdminRoute>
+                  <ContentPipelinePage />
                 </AdminRoute>
               }
             />

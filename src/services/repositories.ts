@@ -7,3 +7,7 @@ export * from "./topicService";
 export { addChapter, addChapters, deleteChapter, getChapterDeleteImpact, getChapters, getChapterWeightage, reorderChapters, updateChapter } from "./chapterService";
 export * from "./questionService";
 export * from "./paperService";
+export * from "./contentService";
+export * from "./generationJobService";
+export * from "./worksheetService";
+export * from "./lessonPlanService";

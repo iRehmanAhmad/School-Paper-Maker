@@ -4,6 +4,10 @@ export type BloomLevel = "remember" | "understand" | "apply" | "analyze" | "eval
 export type QuestionType = "mcq" | "true_false" | "fill_blanks" | "short" | "long" | "matching" | "diagram";
 export type ExamType = "weekly" | "monthly" | "chapterwise" | "quarterly" | "half_yearly" | "annual";
 export type QuestionLevel = "exercise" | "additional" | "past_papers" | "examples" | "conceptual";
+export type ArtifactType = "question" | "worksheet" | "lesson_plan";
+export type IngestStatus = "uploaded" | "processing" | "ready" | "failed";
+export type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+export type CandidateStatus = "pending_review" | "approved" | "rejected" | "published";
 
 export type School = {
   id: string;
@@ -57,6 +61,78 @@ export type TopicEntity = {
   chapter_id: string;
   title: string;
   topic_number: number;
+  created_at: string;
+};
+
+export type ContentSource = {
+  id: string;
+  school_id: string;
+  exam_body_id: string;
+  class_id: string;
+  subject_id: string;
+  chapter_id: string;
+  topic_id?: string | null;
+  title: string;
+  file_path: string;
+  file_hash: string;
+  version_no: number;
+  status: IngestStatus;
+  pages?: number | null;
+  error_message?: string | null;
+  created_by: string;
+  created_at: string;
+};
+
+export type ContentChunk = {
+  id: string;
+  source_id: string;
+  school_id: string;
+  exam_body_id: string;
+  class_id: string;
+  subject_id: string;
+  chapter_id: string;
+  topic_id?: string | null;
+  chunk_no: number;
+  page_from?: number | null;
+  page_to?: number | null;
+  content: string;
+  content_hash: string;
+  created_at: string;
+};
+
+export type GenerationJob = {
+  id: string;
+  school_id: string;
+  exam_body_id: string;
+  class_id: string;
+  subject_id: string;
+  chapter_id: string;
+  topic_id?: string | null;
+  artifact: ArtifactType;
+  request_json: Record<string, unknown>;
+  status: JobStatus;
+  provider?: string | null;
+  model?: string | null;
+  attempts: number;
+  error_message?: string | null;
+  created_by: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  created_at: string;
+};
+
+export type GenerationCandidate = {
+  id: string;
+  job_id: string;
+  school_id: string;
+  artifact: ArtifactType;
+  payload: Record<string, unknown>;
+  validation_errors?: Record<string, unknown> | null;
+  status: CandidateStatus;
+  approved_by?: string | null;
+  approved_at?: string | null;
+  published_table?: string | null;
+  published_id?: string | null;
   created_at: string;
 };
 
@@ -144,6 +220,58 @@ export type PaperTemplate = {
   name: string;
   settings_json: GeneratorSettings;
   created_at: string;
+};
+
+export type Worksheet = {
+  id: string;
+  school_id: string;
+  exam_body_id: string;
+  class_id: string;
+  subject_id: string;
+  chapter_id: string;
+  topic_id?: string | null;
+  title: string;
+  settings_json: Record<string, unknown>;
+  created_by: string;
+  created_at: string;
+};
+
+export type WorksheetItem = {
+  id: string;
+  worksheet_id: string;
+  order_no: number;
+  item_type: string;
+  prompt: string;
+  options?: unknown[] | null;
+  answer_key?: string | null;
+  marks?: number | null;
+  bloom_level?: string | null;
+  difficulty?: string | null;
+};
+
+export type LessonPlan = {
+  id: string;
+  school_id: string;
+  exam_body_id: string;
+  class_id: string;
+  subject_id: string;
+  chapter_id: string;
+  topic_id?: string | null;
+  title: string;
+  duration_minutes?: number | null;
+  objectives: unknown[];
+  created_by: string;
+  created_at: string;
+};
+
+export type LessonPlanBlock = {
+  id: string;
+  lesson_plan_id: string;
+  order_no: number;
+  block_type: string;
+  duration_minutes?: number | null;
+  content: string;
+  resources: unknown[];
 };
 
 export type GeneratorSettings = {

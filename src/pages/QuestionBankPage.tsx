@@ -6,10 +6,11 @@ import { discussGenerationStrategy, generateQuestionsFromPdf, type AIGeneratedQu
 import { ConfirmModal } from "@/components/ConfirmModal";
 import { EmptyState } from "@/components/EmptyState";
 import { useHierarchyScopeParams } from "@/hooks/useHierarchyScopeParams";
-import { addQuestions, deleteQuestionsByIds, getQuestions, getTopics, updateQuestionById } from "@/services/repositories";
+import { addQuestions, deleteQuestionsByIds, getGenerationCandidates, getGenerationJobs, getQuestions, getTopics, updateQuestionById } from "@/services/repositories";
 import { useUndoDeleteQueue } from "@/hooks/useUndoDeleteQueue";
 import { useAppStore } from "@/store/useAppStore";
 import { useHierarchy } from "@/hooks/useHierarchy";
+import { invokePublishCandidates } from "@/services/pipelineRuntime";
 import type { BloomLevel, Difficulty, Question, QuestionLevel, QuestionType, TopicEntity } from "@/types/domain";
 
 const questionTypes: QuestionType[] = ["mcq", "true_false", "fill_blanks", "short", "long", "matching", "diagram"];
@@ -204,6 +205,9 @@ export function QuestionBankPage() {
   const [rawUploadData, setRawUploadData] = useState<any[]>([]);
   const [columnMapping, setColumnMapping] = useState<Record<string, string>>({});
   const [detectedHeaders, setDetectedHeaders] = useState<string[]>([]);
+  const [approvedContextCandidateIds, setApprovedContextCandidateIds] = useState<string[]>([]);
+  const [loadingApprovedCandidates, setLoadingApprovedCandidates] = useState(false);
+  const [publishingApprovedCandidates, setPublishingApprovedCandidates] = useState(false);
 
   useEffect(() => {
     if (chatEndRef.current) {
@@ -315,6 +319,57 @@ export function QuestionBankPage() {
   const activeSubjectName = subjects.find((s) => s.id === activeContext.subjectId)?.name || selectedSubjectName;
   const activeChapterName = chapters.find((c) => c.id === activeChapterId)?.title || selectedChapterName;
   const activeTopicName = topics.find((t) => t.id === activeTopicId)?.title || selectedTopicName || "All Topics";
+
+  async function refreshApprovedContextCandidates() {
+    if (!profile?.school_id || !activeChapterId) {
+      setApprovedContextCandidateIds([]);
+      return;
+    }
+    setLoadingApprovedCandidates(true);
+    try {
+      const [jobs, candidates] = await Promise.all([
+        getGenerationJobs(profile.school_id, { artifact: "question" }),
+        getGenerationCandidates(profile.school_id, { artifact: "question", status: "approved" }),
+      ]);
+      const scopedJobIds = new Set(
+        jobs
+          .filter((job) => job.chapter_id === activeChapterId)
+          .filter((job) => (activeTopicId ? (job.topic_id || "") === activeTopicId : true))
+          .map((job) => job.id),
+      );
+      setApprovedContextCandidateIds(
+        candidates.filter((candidate) => scopedJobIds.has(candidate.job_id)).map((candidate) => candidate.id),
+      );
+    } catch {
+      setApprovedContextCandidateIds([]);
+    } finally {
+      setLoadingApprovedCandidates(false);
+    }
+  }
+
+  async function importApprovedContextCandidates() {
+    if (!approvedContextCandidateIds.length) {
+      toast("error", "No approved AI candidates found for current context");
+      return;
+    }
+    setPublishingApprovedCandidates(true);
+    try {
+      const result = await invokePublishCandidates(approvedContextCandidateIds);
+      if (result.published > 0) {
+        toast("success", `Imported ${result.published} approved question(s)`);
+      } else if (result.failed > 0) {
+        toast("error", `Import failed for ${result.failed} candidate(s)`);
+      } else {
+        toast("error", "No candidates were imported");
+      }
+      await refreshApprovedContextCandidates();
+      await fetchQuestions();
+    } catch (error) {
+      toast("error", error instanceof Error ? error.message : "Failed to import approved candidates");
+    } finally {
+      setPublishingApprovedCandidates(false);
+    }
+  }
 
   function applyExamBody(nextExamBodyId: string) {
     setExamBodyId(nextExamBodyId);
@@ -482,6 +537,18 @@ export function QuestionBankPage() {
   useEffect(() => {
     setSelectedQuestionIds((prev) => prev.filter((id) => questions.some((q) => q.id === id)));
   }, [questions]);
+
+  useEffect(() => {
+    if (viewMode !== "add") {
+      setApprovedContextCandidateIds([]);
+      return;
+    }
+    if (!activeChapterId) {
+      setApprovedContextCandidateIds([]);
+      return;
+    }
+    refreshApprovedContextCandidates();
+  }, [viewMode, profile?.school_id, activeChapterId, activeTopicId, step]);
 
   useEffect(() => {
     if (questionType === "mcq") {
@@ -1604,9 +1671,23 @@ export function QuestionBankPage() {
                   <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
                   BACK TO METHODS
                 </button>
-                <div className="text-right">
-                  <p className="text-[10px] font-bold uppercase text-slate-400">Mode</p>
-                  <p className="text-xs font-bold text-slate-600 capitalize">{entryMode} - {questionType.replace("_", " ")}</p>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={importApprovedContextCandidates}
+                    disabled={publishingApprovedCandidates || loadingApprovedCandidates || approvedContextCandidateIds.length === 0}
+                    className="rounded-lg border border-brand/30 bg-brand/5 px-3 py-1.5 text-[10px] font-bold uppercase tracking-wide text-brand disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {publishingApprovedCandidates
+                      ? "Importing..."
+                      : loadingApprovedCandidates
+                        ? "Checking..."
+                        : `Import Approved (${approvedContextCandidateIds.length})`}
+                  </button>
+                  <div className="text-right">
+                    <p className="text-[10px] font-bold uppercase text-slate-400">Mode</p>
+                    <p className="text-xs font-bold text-slate-600 capitalize">{entryMode} - {questionType.replace("_", " ")}</p>
+                  </div>
                 </div>
               </div>
 

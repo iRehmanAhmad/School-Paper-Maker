@@ -1,7 +1,7 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useState, useCallback, useEffect } from "react";
 import { useAppStore } from "@/store/useAppStore";
-import { BookOpen, ChartPie, FileCog, FileOutput, Folder, GraduationCap, LayoutDashboard, ListChecks, LogOut, Settings, Shapes } from "lucide-react";
+import { BookOpen, ChartPie, DatabaseZap, FileCog, FileOutput, Folder, GraduationCap, LayoutDashboard, ListChecks, LogOut, Settings, Shapes } from "lucide-react";
 
 const adminNav = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -10,6 +10,7 @@ const adminNav = [
   { to: "/subjects", label: "Add Subject", icon: BookOpen },
   { to: "/chapters", label: "Add Chapter", icon: Folder },
   { to: "/question-bank", label: "Add Questions", icon: ListChecks },
+  { to: "/content-pipeline", label: "Content Pipeline", icon: DatabaseZap },
   { to: "/blueprints", label: "Blueprints", icon: FileCog },
   { to: "/analytics", label: "Analytics", icon: ChartPie },
   { to: "/settings", label: "Settings", icon: Settings },

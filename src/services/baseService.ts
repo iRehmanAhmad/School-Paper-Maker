@@ -1,9 +1,15 @@
 import type {
   Blueprint,
+  ContentChunk,
+  ContentSource,
   ChapterEntity,
   ChapterWeightage,
   ClassEntity,
   ExamBody,
+  GenerationCandidate,
+  GenerationJob,
+  LessonPlan,
+  LessonPlanBlock,
   Paper,
   PaperTemplate,
   PaperQuestion,
@@ -13,6 +19,8 @@ import type {
   SubjectEntity,
   TopicEntity,
   UserProfile,
+  Worksheet,
+  WorksheetItem,
 } from "@/types/domain";
 
 export const DB = {
@@ -30,6 +38,14 @@ export const DB = {
   paperQuestions: "pg_paper_questions",
   usage: "pg_usage",
   templates: "pg_templates",
+  contentSources: "pg_content_sources",
+  contentChunks: "pg_content_chunks",
+  generationJobs: "pg_generation_jobs",
+  generationCandidates: "pg_generation_candidates",
+  worksheets: "pg_worksheets",
+  worksheetItems: "pg_worksheet_items",
+  lessonPlans: "pg_lesson_plans",
+  lessonPlanBlocks: "pg_lesson_plan_blocks",
 } as const;
 
 export type Key = (typeof DB)[keyof typeof DB];
@@ -510,6 +526,14 @@ export function ensureSeed() {
   writeLocal(DB.paperQuestions, []);
   writeLocal(DB.usage, []);
   writeLocal(DB.templates, []);
+  writeLocal<ContentSource>(DB.contentSources, []);
+  writeLocal<ContentChunk>(DB.contentChunks, []);
+  writeLocal<GenerationJob>(DB.generationJobs, []);
+  writeLocal<GenerationCandidate>(DB.generationCandidates, []);
+  writeLocal<Worksheet>(DB.worksheets, []);
+  writeLocal<WorksheetItem>(DB.worksheetItems, []);
+  writeLocal<LessonPlan>(DB.lessonPlans, []);
+  writeLocal<LessonPlanBlock>(DB.lessonPlanBlocks, []);
   ensureTopicStructure();
   ensureScienceChapter2DummyQuestions();
 }
