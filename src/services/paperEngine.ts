@@ -72,8 +72,8 @@ function chooseQuestions(pool: Question[], totalNeeded: number, settings: Genera
         const levelNeed = desiredLevel === q.question_level ? 2.5 : 0;
         const recencyPenalty = recentlyUsedIds.has(q.id) ? -3 : 0;
 
-        // Topic Diversity Penalty: Slight penalty if this topic was already chosen in this session
-        const topicKey = q.question_text.slice(0, 30).toLowerCase(); // Heuristic for topic if sub-topic is missing
+        // Topic Diversity Penalty: Prefer variety across explicit topics when available.
+        const topicKey = q.topic_id || q.question_text.slice(0, 30).toLowerCase();
         const topicPenalty = (topicUsage[topicKey] ?? 0) * -1.5;
 
         const score =

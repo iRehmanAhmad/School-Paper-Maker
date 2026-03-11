@@ -1,5 +1,5 @@
 import { hasSupabase, supabase } from "@/services/supabase";
-import type { ClassEntity, SubjectEntity, ChapterEntity, Question, ChapterWeightage, PaperQuestion, QuestionUsage } from "@/types/domain";
+import type { ClassEntity, SubjectEntity, ChapterEntity, Question, ChapterWeightage, PaperQuestion, QuestionUsage, TopicEntity } from "@/types/domain";
 import { DB, ensureSeed, readLocal, writeLocal, assertUniqueName, DeleteImpact } from "./baseService";
 
 export async function getClasses(schoolId: string, examBodyId?: string) {
@@ -90,11 +90,13 @@ export async function deleteClass(classId: string) {
     }
     const subjects = readLocal<SubjectEntity>(DB.subjects).filter((s) => s.class_id === classId).map((s) => s.id);
     const chapters = readLocal<ChapterEntity>(DB.chapters).filter((c) => subjects.includes(c.subject_id)).map((c) => c.id);
+    const topics = readLocal<TopicEntity>(DB.topics).filter((t) => chapters.includes(t.chapter_id)).map((t) => t.id);
     const questions = readLocal<Question>(DB.questions).filter((q) => chapters.includes(q.chapter_id)).map((q) => q.id);
 
     writeLocal(DB.classes, readLocal<ClassEntity>(DB.classes).filter((r) => r.id !== classId));
     writeLocal(DB.subjects, readLocal<SubjectEntity>(DB.subjects).filter((r) => r.class_id !== classId));
     writeLocal(DB.chapters, readLocal<ChapterEntity>(DB.chapters).filter((r) => !subjects.includes(r.subject_id)));
+    writeLocal(DB.topics, readLocal<TopicEntity>(DB.topics).filter((r) => !topics.includes(r.id)));
     writeLocal(DB.questions, readLocal<Question>(DB.questions).filter((r) => !chapters.includes(r.chapter_id)));
     writeLocal(DB.weightage, readLocal<ChapterWeightage>(DB.weightage).filter((r) => !chapters.includes(r.chapter_id)));
     writeLocal(DB.paperQuestions, readLocal<PaperQuestion>(DB.paperQuestions).filter((r) => !questions.includes(r.question_id)));

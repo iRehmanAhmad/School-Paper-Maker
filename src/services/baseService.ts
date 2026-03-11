@@ -11,6 +11,7 @@ import type {
   QuestionUsage,
   School,
   SubjectEntity,
+  TopicEntity,
   UserProfile,
 } from "@/types/domain";
 
@@ -21,6 +22,7 @@ export const DB = {
   classes: "pg_classes",
   subjects: "pg_subjects",
   chapters: "pg_chapters",
+  topics: "pg_topics",
   questions: "pg_questions",
   blueprints: "pg_blueprints",
   weightage: "pg_weightage",
@@ -111,6 +113,80 @@ export type DeleteImpact = {
   questions: number;
 };
 
+function defaultTopicTitles(chapterTitle: string) {
+  const base = chapterTitle.trim() || "Chapter";
+  return [`${base} Basics`, `${base} Practice`];
+}
+
+function ensureTopicStructure() {
+  const chapters = readLocal<ChapterEntity>(DB.chapters);
+  if (!chapters.length) {
+    return;
+  }
+
+  const existingTopics = readLocal<TopicEntity>(DB.topics);
+  const topicsByChapter = new Map<string, TopicEntity[]>();
+  existingTopics.forEach((topic) => {
+    const group = topicsByChapter.get(topic.chapter_id) ?? [];
+    group.push(topic);
+    topicsByChapter.set(topic.chapter_id, group);
+  });
+
+  let nextTopics = [...existingTopics];
+  let topicsChanged = false;
+
+  for (const chapter of chapters) {
+    const chapterTopics = (topicsByChapter.get(chapter.id) ?? []).sort((a, b) => a.topic_number - b.topic_number);
+    if (chapterTopics.length > 0) {
+      continue;
+    }
+    const defaults = defaultTopicTitles(chapter.title);
+    const created = defaults.map((title, index) => ({
+      id: crypto.randomUUID(),
+      chapter_id: chapter.id,
+      title,
+      topic_number: index + 1,
+      created_at: new Date().toISOString(),
+    }));
+    nextTopics = [...created, ...nextTopics];
+    topicsByChapter.set(chapter.id, created);
+    topicsChanged = true;
+  }
+
+  if (topicsChanged) {
+    writeLocal(DB.topics, nextTopics);
+  }
+
+  const currentTopics = topicsChanged ? nextTopics : existingTopics;
+  const firstTopicByChapter = new Map<string, string>();
+  currentTopics
+    .slice()
+    .sort((a, b) => a.topic_number - b.topic_number)
+    .forEach((topic) => {
+      if (!firstTopicByChapter.has(topic.chapter_id)) {
+        firstTopicByChapter.set(topic.chapter_id, topic.id);
+      }
+    });
+
+  const questions = readLocal<Question>(DB.questions);
+  let questionsChanged = false;
+  const patchedQuestions = questions.map((question) => {
+    if (question.topic_id) {
+      return question;
+    }
+    const fallbackTopicId = firstTopicByChapter.get(question.chapter_id);
+    if (!fallbackTopicId) {
+      return question;
+    }
+    questionsChanged = true;
+    return { ...question, topic_id: fallbackTopicId };
+  });
+
+  if (questionsChanged) {
+    writeLocal(DB.questions, patchedQuestions);
+  }
+}
+
 function ensureScienceChapter2DummyQuestions() {
   const school = readLocal<School>(DB.schools)[0];
   if (!school) {
@@ -144,6 +220,12 @@ function ensureScienceChapter2DummyQuestions() {
     writeLocal(DB.chapters, chapters);
   }
 
+  const allTopics = readLocal<TopicEntity>(DB.topics);
+  const chapter2Topics = allTopics
+    .filter((topic) => topic.chapter_id === chapter2.id)
+    .sort((a, b) => a.topic_number - b.topic_number);
+  const defaultTopicId = chapter2Topics[0]?.id || null;
+
   const allQuestions = readLocal<Question>(DB.questions);
   const hasType = (type: Question["question_type"]) => allQuestions.some((q) => q.chapter_id === chapter2.id && q.question_type === type);
   const now = new Date().toISOString();
@@ -153,6 +235,7 @@ function ensureScienceChapter2DummyQuestions() {
     toAdd.push({
       id: crypto.randomUUID(),
       chapter_id: chapter2.id,
+      topic_id: defaultTopicId,
       school_id: school.id,
       question_type: "mcq",
       question_text: "Which state of matter has fixed shape and fixed volume?",
@@ -175,6 +258,7 @@ function ensureScienceChapter2DummyQuestions() {
     toAdd.push({
       id: crypto.randomUUID(),
       chapter_id: chapter2.id,
+      topic_id: defaultTopicId,
       school_id: school.id,
       question_type: "true_false",
       question_text: "Water can exist as solid, liquid and gas.",
@@ -197,6 +281,7 @@ function ensureScienceChapter2DummyQuestions() {
     toAdd.push({
       id: crypto.randomUUID(),
       chapter_id: chapter2.id,
+      topic_id: defaultTopicId,
       school_id: school.id,
       question_type: "fill_blanks",
       question_text: "The change of liquid water into vapor is called ________.",
@@ -219,6 +304,7 @@ function ensureScienceChapter2DummyQuestions() {
     toAdd.push({
       id: crypto.randomUUID(),
       chapter_id: chapter2.id,
+      topic_id: defaultTopicId,
       school_id: school.id,
       question_type: "short",
       question_text: "Define force and write one daily-life example.",
@@ -241,6 +327,7 @@ function ensureScienceChapter2DummyQuestions() {
     toAdd.push({
       id: crypto.randomUUID(),
       chapter_id: chapter2.id,
+      topic_id: defaultTopicId,
       school_id: school.id,
       question_type: "long",
       question_text: "Explain the water cycle with evaporation, condensation and precipitation.",
@@ -263,6 +350,7 @@ function ensureScienceChapter2DummyQuestions() {
     toAdd.push({
       id: crypto.randomUUID(),
       chapter_id: chapter2.id,
+      topic_id: defaultTopicId,
       school_id: school.id,
       question_type: "matching",
       question_text: "Match terms: A) Evaporation B) Condensation C) Precipitation",
@@ -285,6 +373,7 @@ function ensureScienceChapter2DummyQuestions() {
     toAdd.push({
       id: crypto.randomUUID(),
       chapter_id: chapter2.id,
+      topic_id: defaultTopicId,
       school_id: school.id,
       question_type: "diagram",
       question_text: "Label the stages shown in the water cycle diagram.",
@@ -312,6 +401,7 @@ export function ensureSeed() {
   const hasExisting = readLocal<School>(DB.schools).length > 0;
   const hasBodies = readLocal<ExamBody>(DB.examBodies).length > 0;
   if (hasExisting && hasBodies) {
+    ensureTopicStructure();
     ensureScienceChapter2DummyQuestions();
     return;
   }
@@ -330,6 +420,12 @@ export function ensureSeed() {
   const ch1 = crypto.randomUUID();
   const ch2 = crypto.randomUUID();
   const ch3 = crypto.randomUUID();
+  const t11 = crypto.randomUUID();
+  const t12 = crypto.randomUUID();
+  const t21 = crypto.randomUUID();
+  const t22 = crypto.randomUUID();
+  const t31 = crypto.randomUUID();
+  const t32 = crypto.randomUUID();
   const now = new Date().toISOString();
 
   writeLocal<School>(DB.schools, [{ id: schoolId, name: "ABC Public School", created_at: now }]);
@@ -358,6 +454,14 @@ export function ensureSeed() {
     { id: ch2, subject_id: subjectPunjabSci, title: "Human Body", chapter_number: 2, created_at: now },
     { id: ch3, subject_id: subjectPunjabSci, title: "Matter", chapter_number: 3, created_at: now },
   ]);
+  writeLocal<TopicEntity>(DB.topics, [
+    { id: t11, chapter_id: ch1, title: "Parts of Plants", topic_number: 1, created_at: now },
+    { id: t12, chapter_id: ch1, title: "Photosynthesis", topic_number: 2, created_at: now },
+    { id: t21, chapter_id: ch2, title: "Digestive System", topic_number: 1, created_at: now },
+    { id: t22, chapter_id: ch2, title: "Respiratory System", topic_number: 2, created_at: now },
+    { id: t31, chapter_id: ch3, title: "States of Matter", topic_number: 1, created_at: now },
+    { id: t32, chapter_id: ch3, title: "Physical Changes", topic_number: 2, created_at: now },
+  ]);
   writeLocal<ChapterWeightage>(DB.weightage, [
     { id: crypto.randomUUID(), chapter_id: ch1, exam_type: "monthly", weight_percent: 20 },
     { id: crypto.randomUUID(), chapter_id: ch2, exam_type: "monthly", weight_percent: 40 },
@@ -367,14 +471,22 @@ export function ensureSeed() {
   const difficulties = ["easy", "medium", "hard"] as const;
   const blooms = ["remember", "understand", "apply", "analyze", "evaluate"] as const;
   const types = ["mcq", "true_false", "fill_blanks", "short", "long", "matching", "diagram"] as const;
+  const chapterTopicMap: Record<string, string[]> = {
+    [ch1]: [t11, t12],
+    [ch2]: [t21, t22],
+    [ch3]: [t31, t32],
+  };
   const questionRows: Question[] = [];
   for (let i = 1; i <= 300; i += 1) {
     const chapterId = [ch1, ch2, ch3][i % 3];
+    const topicPool = chapterTopicMap[chapterId] || [];
+    const topicId = topicPool.length ? topicPool[i % topicPool.length] : null;
     const t = types[i % types.length];
     const marks = t === "long" ? 5 : t === "short" ? 2 : 1;
     questionRows.push({
       id: crypto.randomUUID(),
       chapter_id: chapterId,
+      topic_id: topicId,
       school_id: schoolId,
       question_type: t,
       question_text: `Sample ${t} question ${i}`,
@@ -398,5 +510,6 @@ export function ensureSeed() {
   writeLocal(DB.paperQuestions, []);
   writeLocal(DB.usage, []);
   writeLocal(DB.templates, []);
+  ensureTopicStructure();
   ensureScienceChapter2DummyQuestions();
 }

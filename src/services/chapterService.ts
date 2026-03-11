@@ -1,5 +1,5 @@
 import { hasSupabase, supabase } from "@/services/supabase";
-import type { ChapterEntity, Question, ChapterWeightage, PaperQuestion, QuestionUsage } from "@/types/domain";
+import type { ChapterEntity, Question, ChapterWeightage, PaperQuestion, QuestionUsage, TopicEntity } from "@/types/domain";
 import { DB, ensureSeed, readLocal, writeLocal, normalizeText, DeleteImpact } from "./baseService";
 
 export async function getChapters(subjectIds: string[]) {
@@ -177,6 +177,7 @@ export async function reorderChapters(subjectId: string, orderedChapterIds: stri
 
 export async function deleteChapter(chapterId: string) {
     if (hasSupabase && supabase) {
+        await supabase.from("topics").delete().eq("chapter_id", chapterId);
         const { error } = await supabase.from("chapters").delete().eq("id", chapterId);
         if (error) {
             throw error;
@@ -185,6 +186,7 @@ export async function deleteChapter(chapterId: string) {
     }
     const questions = readLocal<Question>(DB.questions).filter((q) => q.chapter_id === chapterId).map((q) => q.id);
     writeLocal(DB.chapters, readLocal<ChapterEntity>(DB.chapters).filter((r) => r.id !== chapterId));
+    writeLocal(DB.topics, readLocal<TopicEntity>(DB.topics).filter((r) => r.chapter_id !== chapterId));
     writeLocal(DB.questions, readLocal<Question>(DB.questions).filter((r) => r.chapter_id !== chapterId));
     writeLocal(DB.weightage, readLocal<ChapterWeightage>(DB.weightage).filter((r) => r.chapter_id !== chapterId));
     writeLocal(DB.paperQuestions, readLocal<PaperQuestion>(DB.paperQuestions).filter((r) => !questions.includes(r.question_id)));

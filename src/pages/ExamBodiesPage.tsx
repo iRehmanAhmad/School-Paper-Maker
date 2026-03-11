@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { addExamBody, deleteExamBody, getExamBodies, getExamBodyDeleteImpact, updateExamBodyName } from "@/services/repositories";
 import { ConfirmModal } from "@/components/ConfirmModal";
@@ -23,6 +23,12 @@ const examBodySuggestions = [
   "Cambridge O Level",
   "Cambridge A Level",
 ];
+
+function findSuggestion(value: string, suggestions: string[]) {
+  const needle = value.trim().toLowerCase();
+  if (!needle) return "";
+  return suggestions.find((item) => item.toLowerCase().startsWith(needle)) || "";
+}
 
 export function ExamBodiesPage() {
   const navigate = useNavigate();
@@ -114,6 +120,15 @@ export function ExamBodiesPage() {
     }
   }
 
+  function onExamBodyNameKeyDown(e: KeyboardEvent<HTMLInputElement>) {
+    if (e.key !== "Tab") return;
+    const suggestion = findSuggestion(name, examBodySuggestions);
+    if (!suggestion) return;
+    if (suggestion.toLowerCase() === name.trim().toLowerCase()) return;
+    e.preventDefault();
+    setName(suggestion);
+  }
+
   const filteredRows = rows.filter((row) => row.name.toLowerCase().includes(search.trim().toLowerCase()));
   const selectedScopeBodyName = rows.find((row) => row.id === scope.examBodyId)?.name;
 
@@ -158,17 +173,13 @@ export function ExamBodiesPage() {
           Exam Body Name
           <input
             className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
-            list="exam-body-suggestions"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. Punjab Govt"
+            onKeyDown={onExamBodyNameKeyDown}
+            autoComplete="off"
+            placeholder="e.g. Punjab Govt (Tab to autocomplete)"
           />
         </label>
-        <datalist id="exam-body-suggestions">
-          {examBodySuggestions.map((item) => (
-            <option key={item} value={item} />
-          ))}
-        </datalist>
         <button className="rounded-lg bg-brand px-4 py-2 text-white">Add</button>
       </form>
       <label className="block text-xs font-semibold text-slate-600">

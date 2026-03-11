@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { addClass, deleteClass, getClassDeleteImpact, getClasses, getExamBodies, updateClassName } from "@/services/repositories";
 import { ConfirmModal } from "@/components/ConfirmModal";
@@ -25,6 +25,12 @@ const chipColors = [
   "bg-pink-100 text-pink-700",
 ];
 const classSuggestions = ["Pre-KG", "KG", "Class 1", "Class 2", "Class 3", "Class 4", "Class 5", "Class 6", "Class 7", "Class 8", "Class 9", "Class 10", "O Level", "A Level"];
+
+function findSuggestion(value: string, suggestions: string[]) {
+  const needle = value.trim().toLowerCase();
+  if (!needle) return "";
+  return suggestions.find((item) => item.toLowerCase().startsWith(needle)) || "";
+}
 
 export function ClassesPage() {
   const navigate = useNavigate();
@@ -129,6 +135,15 @@ export function ClassesPage() {
     }
   }
 
+  function onClassNameKeyDown(e: KeyboardEvent<HTMLInputElement>) {
+    if (e.key !== "Tab") return;
+    const suggestion = findSuggestion(name, classSuggestions);
+    if (!suggestion) return;
+    if (suggestion.toLowerCase() === name.trim().toLowerCase()) return;
+    e.preventDefault();
+    setName(suggestion);
+  }
+
   const filteredRows = rows.filter((row) => row.name.toLowerCase().includes(search.trim().toLowerCase()));
   const selectedBodyName = examBodies.find((item) => item.id === examBodyId)?.name;
   const selectedScopeClassName = rows.find((item) => item.id === scope.classId)?.name;
@@ -195,13 +210,15 @@ export function ClassesPage() {
         </label>
         <label className="min-w-56 flex-1 text-xs font-semibold text-slate-600">
           Class Name
-          <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" list="class-suggestions" value={name} onChange={(e) => setName(e.target.value)} placeholder="Class name" />
+          <input
+            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={onClassNameKeyDown}
+            autoComplete="off"
+            placeholder="Class name (type then Tab to autocomplete)"
+          />
         </label>
-        <datalist id="class-suggestions">
-          {classSuggestions.map((item) => (
-            <option key={item} value={item} />
-          ))}
-        </datalist>
         <button className="rounded-lg bg-brand px-4 py-2 text-white">Add Class</button>
       </form>
       <div className="rounded-xl border border-slate-200 bg-white p-3">

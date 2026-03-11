@@ -105,27 +105,37 @@ export function useHierarchy(schoolId: string | null | undefined, options?: UseH
     });
   }, [schoolId, examBodyId]);
 
-  // Load Subjects when Classes change.
+  // Load Subjects lazily: only for selected class when available.
   useEffect(() => {
     if (classes.length === 0) {
       setSubjects([]);
       return;
     }
-    getSubjects(classes.map((item) => item.id)).then((data) => {
+    const targetClassIds = classId ? [classId] : (autoSelectFirst ? classes.slice(0, 1).map((item) => item.id) : []);
+    if (!targetClassIds.length) {
+      setSubjects([]);
+      return;
+    }
+    getSubjects(targetClassIds).then((data) => {
       setSubjects(data);
     });
-  }, [classes]);
+  }, [classes, classId, autoSelectFirst]);
 
-  // Load Chapters when Subjects change.
+  // Load Chapters lazily: only for selected subject when available.
   useEffect(() => {
     if (subjects.length === 0) {
       setChapters([]);
       return;
     }
-    getChapters(subjects.map((item) => item.id)).then((data) => {
+    const targetSubjectIds = subjectId ? [subjectId] : (autoSelectFirst ? subjects.slice(0, 1).map((item) => item.id) : []);
+    if (!targetSubjectIds.length) {
+      setChapters([]);
+      return;
+    }
+    getChapters(targetSubjectIds).then((data) => {
       setChapters(data);
     });
-  }, [subjects]);
+  }, [subjects, subjectId, autoSelectFirst]);
 
   const visibleSubjects = useMemo(() => subjects.filter((item) => !classId || item.class_id === classId), [subjects, classId]);
   const visibleChapters = useMemo(() => chapters.filter((item) => !subjectId || item.subject_id === subjectId), [chapters, subjectId]);
@@ -170,4 +180,3 @@ export function useHierarchy(schoolId: string | null | undefined, options?: UseH
     loading,
   };
 }
-

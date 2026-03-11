@@ -1,5 +1,5 @@
 import { hasSupabase, supabase } from "@/services/supabase";
-import type { ExamBody, ClassEntity, SubjectEntity, ChapterEntity, Question, ChapterWeightage, PaperQuestion, QuestionUsage } from "@/types/domain";
+import type { ExamBody, ClassEntity, SubjectEntity, ChapterEntity, Question, ChapterWeightage, PaperQuestion, QuestionUsage, TopicEntity } from "@/types/domain";
 import { DB, ensureSeed, readLocal, writeLocal, assertUniqueName, DeleteImpact } from "./baseService";
 
 export async function getExamBodies(schoolId: string) {
@@ -86,12 +86,14 @@ export async function deleteExamBody(examBodyId: string) {
     const classes = readLocal<ClassEntity>(DB.classes).filter((c) => c.exam_body_id === examBodyId).map((c) => c.id);
     const subjects = readLocal<SubjectEntity>(DB.subjects).filter((s) => classes.includes(s.class_id)).map((s) => s.id);
     const chapters = readLocal<ChapterEntity>(DB.chapters).filter((c) => subjects.includes(c.subject_id)).map((c) => c.id);
+    const topics = readLocal<TopicEntity>(DB.topics).filter((t) => chapters.includes(t.chapter_id)).map((t) => t.id);
     const questions = readLocal<Question>(DB.questions).filter((q) => chapters.includes(q.chapter_id)).map((q) => q.id);
 
     writeLocal(DB.examBodies, readLocal<ExamBody>(DB.examBodies).filter((r) => r.id !== examBodyId));
     writeLocal(DB.classes, readLocal<ClassEntity>(DB.classes).filter((r) => r.exam_body_id !== examBodyId));
     writeLocal(DB.subjects, readLocal<SubjectEntity>(DB.subjects).filter((r) => !classes.includes(r.class_id)));
     writeLocal(DB.chapters, readLocal<ChapterEntity>(DB.chapters).filter((r) => !subjects.includes(r.subject_id)));
+    writeLocal(DB.topics, readLocal<TopicEntity>(DB.topics).filter((r) => !topics.includes(r.id)));
     writeLocal(DB.questions, readLocal<Question>(DB.questions).filter((r) => !chapters.includes(r.chapter_id)));
     writeLocal(DB.weightage, readLocal<ChapterWeightage>(DB.weightage).filter((r) => !chapters.includes(r.chapter_id)));
     writeLocal(DB.paperQuestions, readLocal<PaperQuestion>(DB.paperQuestions).filter((r) => !questions.includes(r.question_id)));

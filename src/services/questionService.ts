@@ -77,6 +77,50 @@ export async function getQuestionCountsByChapter(schoolId: string, chapterIds: s
     return counts;
 }
 
+export async function getQuestionCountsByTopic(schoolId: string, topicIds: string[]) {
+    ensureSeed();
+    if (!topicIds.length) {
+        return {} as Record<string, number>;
+    }
+
+    if (hasSupabase && supabase) {
+        const counts: Record<string, number> = {};
+        const pageSize = 1000;
+        let from = 0;
+
+        while (true) {
+            const { data, error } = await supabase
+                .from("questions")
+                .select("topic_id")
+                .eq("school_id", schoolId)
+                .in("topic_id", topicIds)
+                .range(from, from + pageSize - 1);
+            if (error) {
+                throw error;
+            }
+            const rows = (data ?? []) as Array<Pick<Question, "topic_id">>;
+            for (const row of rows) {
+                if (!row.topic_id) continue;
+                counts[row.topic_id] = (counts[row.topic_id] ?? 0) + 1;
+            }
+            if (rows.length < pageSize) {
+                break;
+            }
+            from += pageSize;
+        }
+        return counts;
+    }
+
+    const counts: Record<string, number> = {};
+    for (const row of readLocal<Question>(DB.questions)) {
+        if (row.school_id !== schoolId || !row.topic_id || !topicIds.includes(row.topic_id)) {
+            continue;
+        }
+        counts[row.topic_id] = (counts[row.topic_id] ?? 0) + 1;
+    }
+    return counts;
+}
+
 export async function updateQuestionById(questionId: string, patch: Partial<Omit<Question, "id" | "created_at">>) {
     if (hasSupabase && supabase) {
         const { data, error } = await supabase

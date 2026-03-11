@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { addSubject, deleteSubject, getClasses, getExamBodies, getSubjectDeleteImpact, getSubjects, updateSubjectName } from "@/services/repositories";
 import { ConfirmModal } from "@/components/ConfirmModal";
@@ -46,6 +46,12 @@ const pakistanSubjects = [
   "Quran",
   "Tajweed",
 ];
+
+function findSuggestion(value: string, suggestions: string[]) {
+  const needle = value.trim().toLowerCase();
+  if (!needle) return "";
+  return suggestions.find((item) => item.toLowerCase().startsWith(needle)) || "";
+}
 
 export function SubjectsPage() {
   const navigate = useNavigate();
@@ -167,6 +173,15 @@ export function SubjectsPage() {
     }
   }
 
+  function onSubjectNameKeyDown(e: KeyboardEvent<HTMLInputElement>) {
+    if (e.key !== "Tab") return;
+    const suggestion = findSuggestion(name, pakistanSubjects);
+    if (!suggestion) return;
+    if (suggestion.toLowerCase() === name.trim().toLowerCase()) return;
+    e.preventDefault();
+    setName(suggestion);
+  }
+
   const filteredRows = rows.filter((r) => {
     if (classId && r.class_id !== classId) {
       return false;
@@ -256,13 +271,15 @@ export function SubjectsPage() {
         </label>
         <label className="text-xs font-semibold text-slate-600">
           Subject Name
-          <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" list="subject-suggestions" value={name} onChange={(e) => setName(e.target.value)} placeholder="Subject name" />
+          <input
+            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={onSubjectNameKeyDown}
+            autoComplete="off"
+            placeholder="Subject name (type then Tab to autocomplete)"
+          />
         </label>
-        <datalist id="subject-suggestions">
-          {pakistanSubjects.map((item) => (
-            <option key={item} value={item} />
-          ))}
-        </datalist>
         <button className="rounded-lg bg-brand px-4 py-2 text-white">Add Subject</button>
       </form>
       <div className="rounded-xl border border-slate-200 bg-white p-3">

@@ -9,13 +9,14 @@ import {
   getExamBodies,
   getQuestions,
   getRecentQuestionUsage,
+  getTopics,
   getSubjects,
   savePaperAndUsage,
   getPaperBundleById,
 } from "@/services/repositories";
 import { useAppStore } from "@/store/useAppStore";
 import { useSearchParams } from "react-router-dom";
-import type { BloomLevel, ChapterEntity, ClassEntity, Difficulty, ExamBody, GeneratorSettings, SubjectEntity, QuestionLevel, QuestionType, GeneratedQuestion, BlueprintSection } from "@/types/domain";
+import type { BloomLevel, ChapterEntity, ClassEntity, Difficulty, ExamBody, GeneratorSettings, SubjectEntity, QuestionLevel, QuestionType, GeneratedQuestion, BlueprintSection, TopicEntity } from "@/types/domain";
 
 type CompositionRow = {
   type: QuestionType;
@@ -87,6 +88,7 @@ export function PaperGeneratorPage() {
   const [examBodies, setExamBodies] = useState<ExamBody[]>([]);
   const [subjects, setSubjects] = useState<SubjectEntity[]>([]);
   const [chapters, setChapters] = useState<ChapterEntity[]>([]);
+  const [topics, setTopics] = useState<TopicEntity[]>([]);
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [step, setStep] = useState(1);
@@ -95,6 +97,7 @@ export function PaperGeneratorPage() {
   const [classId, setClassId] = useState("");
   const [subjectId, setSubjectId] = useState("");
   const [chapterIds, setChapterIds] = useState<string[]>([]);
+  const [selectedTopicIds, setSelectedTopicIds] = useState<string[]>([]);
   const [selectedLevels, setSelectedLevels] = useState<QuestionLevel[]>(["exercise"]);
   const [recentPapersToAvoid, setRecentPapersToAvoid] = useState(3);
   const [previewScale, setPreviewScale] = useState(1.0);
@@ -217,6 +220,8 @@ export function PaperGeneratorPage() {
     setSubjects(s);
     const ch = await getChapters(s.map((x) => x.id));
     setChapters(ch);
+    const tp = await getTopics(ch.map((x) => x.id));
+    setTopics(tp);
 
     const cid = classId || c[0]?.id || "";
     setClassId(cid);
@@ -279,6 +284,7 @@ export function PaperGeneratorPage() {
           setClassId(settings.classId);
           setSubjectId(settings.subjectId);
           setChapterIds(settings.chapterIds);
+          setSelectedTopicIds(Array.isArray(settings.topicIds) ? settings.topicIds : []);
           setExamBodyId(settings.examBodyId || examBodyId);
           setSelectedLevels(settings.levels || ["exercise"]);
           setHeader(settings.header);
@@ -332,6 +338,7 @@ export function PaperGeneratorPage() {
           .filter((c) => c.subject_id === blueprint.subject_id)
           .sort((a, b) => a.chapter_number - b.chapter_number);
         setChapterIds(subjectChapters.map((c) => c.id));
+        setSelectedTopicIds([]);
 
         setComposition(mapBlueprintToComposition(blueprint.structure_json.sections));
         setHeader((prev) => ({ ...prev, examTitle: blueprint.name }));
@@ -368,6 +375,25 @@ export function PaperGeneratorPage() {
       .filter((c) => c.subject_id === subjectId)
       .sort((a, b) => a.chapter_number - b.chapter_number);
   }, [chapters, subjectId]);
+  const filteredTopics = useMemo(() => {
+    if (!chapterIds.length) return [] as TopicEntity[];
+    return topics
+      .filter((topic) => chapterIds.includes(topic.chapter_id))
+      .sort((a, b) => a.topic_number - b.topic_number);
+  }, [topics, chapterIds]);
+
+  useEffect(() => {
+    if (!chapterIds.length) return;
+    const visible = new Set(filteredChapters.map((chapter) => chapter.id));
+    setChapterIds((prev) => prev.filter((id) => visible.has(id)));
+  }, [filteredChapters, chapterIds.length]);
+
+  useEffect(() => {
+    if (!selectedTopicIds.length) return;
+    if (chapterIds.length > 0 && topics.length === 0) return;
+    const visible = new Set(filteredTopics.map((topic) => topic.id));
+    setSelectedTopicIds((prev) => prev.filter((id) => visible.has(id)));
+  }, [filteredTopics, selectedTopicIds.length, chapterIds.length, topics.length]);
 
   // Fetch individual chapter counts for display in the syllabus step
   useEffect(() => {
@@ -394,13 +420,17 @@ export function PaperGeneratorPage() {
         return;
       }
       const q = await getQuestions(profile.school_id, chapterIds);
-      const filtered = q.filter((x) => selectedLevels.includes(resolveQuestionLevel(x.question_level)));
+      const filtered = q.filter(
+        (x) =>
+          selectedLevels.includes(resolveQuestionLevel(x.question_level)) &&
+          (!selectedTopicIds.length || (!!x.topic_id && selectedTopicIds.includes(x.topic_id)))
+      );
       const counts: Record<QuestionType, number> = { mcq: 0, true_false: 0, fill_blanks: 0, short: 0, long: 0, matching: 0, diagram: 0 };
       filtered.forEach(x => { counts[x.question_type] = (counts[x.question_type] || 0) + 1; });
       setAvailableCounts(counts);
     }
     updateCounts();
-  }, [profile?.school_id, chapterIds, selectedLevels]);
+  }, [profile?.school_id, chapterIds, selectedLevels, selectedTopicIds]);
 
   async function generate() {
     if (!profile?.school_id || !profile.id || !subjectId || !chapterIds.length) {
@@ -412,10 +442,14 @@ export function PaperGeneratorPage() {
     setGenerated(null); // Clear old paper to prevent stale previews/prints
 
     const questionPool = await getQuestions(profile.school_id, chapterIds);
-    const filteredPool = questionPool.filter((q) => selectedLevels.includes(resolveQuestionLevel(q.question_level)));
+    const filteredPool = questionPool.filter(
+      (q) =>
+        selectedLevels.includes(resolveQuestionLevel(q.question_level)) &&
+        (!selectedTopicIds.length || (!!q.topic_id && selectedTopicIds.includes(q.topic_id)))
+    );
 
     if (filteredPool.length === 0) {
-      toast("error", "The selected chapters have no questions. Please select different chapters or question levels.");
+      toast("error", "No questions match selected chapters/topics/levels. Adjust your syllabus filters.");
       return false;
     }
 
@@ -440,6 +474,7 @@ export function PaperGeneratorPage() {
       classId,
       subjectId,
       chapterIds,
+      topicIds: selectedTopicIds,
       examType: "monthly",
       sets: 1,
       recentPapersToAvoid,
@@ -678,8 +713,74 @@ export function PaperGeneratorPage() {
 
               <div className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
                 <h3 className="text-lg font-bold mb-6 flex items-center justify-between text-slate-800">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-3">
                     <span className="w-8 h-8 rounded-lg bg-brand/10 text-brand flex items-center justify-center text-sm font-black">4</span>
+                    Select Topics (Optional)
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!filteredTopics.length) return;
+                        setSelectedTopicIds((prev) => (prev.length === filteredTopics.length ? [] : filteredTopics.map((topic) => topic.id)));
+                      }}
+                      className="rounded-lg bg-slate-100 px-3 py-1 text-[10px] font-black uppercase tracking-widest text-slate-600 hover:bg-slate-200"
+                      disabled={!filteredTopics.length}
+                    >
+                      {selectedTopicIds.length === filteredTopics.length && filteredTopics.length > 0 ? "Unselect All Topics" : "Select All Topics"}
+                    </button>
+                    <div className="px-2 py-0.5 rounded bg-slate-100 text-[10px] font-black text-slate-500 uppercase tracking-widest">{selectedTopicIds.length} Selected</div>
+                  </div>
+                </h3>
+
+                {!chapterIds.length ? (
+                  <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-4 text-xs font-semibold text-slate-500">
+                    Select one or more chapters first, then their topics will appear here.
+                  </div>
+                ) : filteredTopics.length === 0 ? (
+                  <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-4 text-xs font-semibold text-slate-500">
+                    No topics available under selected chapters yet.
+                  </div>
+                ) : (
+                  <div className="max-h-[320px] space-y-4 overflow-y-auto pr-2 custom-scrollbar">
+                    {filteredChapters
+                      .filter((chapter) => chapterIds.includes(chapter.id))
+                      .map((chapter) => {
+                        const chapterTopics = filteredTopics.filter((topic) => topic.chapter_id === chapter.id);
+                        if (!chapterTopics.length) return null;
+                        return (
+                          <div key={chapter.id} className="space-y-2">
+                            <p className="text-xs font-black uppercase tracking-wider text-slate-500">
+                              Ch {chapter.chapter_number}: {chapter.title}
+                            </p>
+                            <div className="grid gap-2 sm:grid-cols-2">
+                              {chapterTopics.map((topic) => (
+                                <label key={topic.id} className={`flex items-center gap-2 rounded-xl border p-3 text-sm font-semibold transition-all cursor-pointer ${selectedTopicIds.includes(topic.id) ? "border-brand-light bg-brand/5 text-slate-800" : "border-slate-100 text-slate-600 hover:border-slate-200 hover:bg-slate-50"}`}>
+                                  <input
+                                    type="checkbox"
+                                    className="h-4 w-4 rounded border-slate-300 text-brand focus:ring-brand"
+                                    checked={selectedTopicIds.includes(topic.id)}
+                                    onChange={(e) =>
+                                      e.target.checked
+                                        ? setSelectedTopicIds((prev) => Array.from(new Set([...prev, topic.id])))
+                                        : setSelectedTopicIds((prev) => prev.filter((id) => id !== topic.id))
+                                    }
+                                  />
+                                  <span>{topic.topic_number}. {topic.title}</span>
+                                </label>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
+                <h3 className="text-lg font-bold mb-6 flex items-center justify-between text-slate-800">
+                  <div className="flex items-center gap-2">
+                    <span className="w-8 h-8 rounded-lg bg-brand/10 text-brand flex items-center justify-center text-sm font-black">5</span>
                     Question Origin
                   </div>
                 </h3>
@@ -738,9 +839,13 @@ export function PaperGeneratorPage() {
                     </div>
                   ) : (
                     <div className="text-center py-4 text-[10px] font-black text-amber-500 uppercase tracking-widest bg-amber-50 rounded-xl border border-amber-100">
-                      Select chapters & levels
+                      Select chapters/topics & levels
                     </div>
                   )}
+                  <div className="mt-3 flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-[10px] font-black uppercase tracking-wider text-slate-500">
+                    <span>Topic Filter</span>
+                    <span className="text-slate-700">{selectedTopicIds.length ? `${selectedTopicIds.length} selected` : "All topics"}</span>
+                  </div>
                 </div>
                 <button onClick={() => setStep(3)} disabled={!chapterIds.length} className="w-full rounded-2xl bg-brand py-4 font-bold text-white shadow-lg shadow-brand/20 hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-50 flex items-center justify-center gap-2 group">Configure Composition <svg className="group-hover:translate-x-1 transition-transform" width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7l5 5m0 0l-5 5m5-5H6" /></svg></button>
                 <button onClick={() => setStep(1)} className="w-full mt-3 rounded-2xl bg-slate-100 py-3 font-bold text-slate-400 hover:bg-slate-200 transition-all text-xs uppercase tracking-widest">Back</button>
@@ -754,7 +859,7 @@ export function PaperGeneratorPage() {
             <div className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm overflow-hidden border-b-4 border-brand">
               <h3 className="text-lg font-bold mb-6 flex items-center justify-between text-slate-800">
                 <div className="flex items-center gap-3">
-                  <span className="w-8 h-8 rounded-lg bg-brand/10 text-brand flex items-center justify-center text-sm font-black">5</span>
+                  <span className="w-8 h-8 rounded-lg bg-brand/10 text-brand flex items-center justify-center text-sm font-black">6</span>
                   Construction Strategy
                 </div>
                 {/* Save/Load Preset UI */}
@@ -1005,11 +1110,12 @@ export function PaperGeneratorPage() {
                     const replacements = allAvailable.filter(
                       q => q.question_type === type &&
                         selectedLevels.includes(resolveQuestionLevel(q.question_level)) &&
+                        (!selectedTopicIds.length || (!!q.topic_id && selectedTopicIds.includes(q.topic_id))) &&
                         !currentIds.includes(q.id)
                     );
 
                     if (replacements.length === 0) {
-                      toast("error", "No alternative questions available in the current pool. Please add more chapters or levels.");
+                      toast("error", "No alternative questions available in the current chapter/topic/level pool.");
                       return;
                     }
 

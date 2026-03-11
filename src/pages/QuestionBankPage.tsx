@@ -1,19 +1,16 @@
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { downloadQuestionTemplate } from "@/utils/templateGenerator";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import { discussGenerationStrategy, generateQuestionsFromPdf, type AIGeneratedQuestion, type ChatMessage } from "@/services/ai";
 import { ConfirmModal } from "@/components/ConfirmModal";
-import { ContextBreadcrumbs } from "@/components/ContextBreadcrumbs";
 import { EmptyState } from "@/components/EmptyState";
 import { useHierarchyScopeParams } from "@/hooks/useHierarchyScopeParams";
-import { addQuestions, deleteQuestionsByIds, getQuestions, updateQuestionById } from "@/services/repositories";
+import { addQuestions, deleteQuestionsByIds, getQuestions, getTopics, updateQuestionById } from "@/services/repositories";
 import { useUndoDeleteQueue } from "@/hooks/useUndoDeleteQueue";
 import { useAppStore } from "@/store/useAppStore";
 import { useHierarchy } from "@/hooks/useHierarchy";
-import { hierarchyScopeToSearch } from "@/utils/hierarchyScope";
-import type { BloomLevel, Difficulty, Question, QuestionLevel, QuestionType } from "@/types/domain";
+import type { BloomLevel, Difficulty, Question, QuestionLevel, QuestionType, TopicEntity } from "@/types/domain";
 
 const questionTypes: QuestionType[] = ["mcq", "true_false", "fill_blanks", "short", "long", "matching", "diagram"];
 const difficultyLevels: Difficulty[] = ["easy", "medium", "hard"];
@@ -94,15 +91,37 @@ type DeleteQuestionIntent = {
   message: string;
 };
 
+type LockedContext = {
+  examBodyId: string;
+  classId: string;
+  subjectId: string;
+  chapterId: string;
+  topicId?: string;
+};
+
+type ManualSnapshot = {
+  questionType: QuestionType;
+  diff: Difficulty;
+  bloom: BloomLevel | "";
+  qLevel: QuestionLevel;
+  options: string[];
+  correct: string;
+  explanation: string;
+  diagramUrl: string;
+  matchingLeft: string[];
+  matchingRight: string[];
+};
+
+type UploadStep = "select" | "map" | "preview";
+
 
 export function QuestionBankPage() {
-  const navigate = useNavigate();
   const profile = useAppStore((s) => s.profile);
   const toast = useAppStore((s) => s.pushToast);
-  const { scope, mergeScope, clearFrom, scopeToLevel } = useHierarchyScopeParams();
+  const { scope, mergeScope } = useHierarchyScopeParams();
   const { queueDelete } = useUndoDeleteQueue();
 
-  const [viewMode, setViewMode] = useState<"add" | "manage">("manage");
+  const [viewMode, setViewMode] = useState<"add" | "manage">("add");
   const {
     examBodies,
     classes,
@@ -117,6 +136,8 @@ export function QuestionBankPage() {
     chapterId,
     setChapterId,
   } = useHierarchy(profile?.school_id, { initialScope: scope, autoSelectFirst: false });
+  const [topics, setTopics] = useState<TopicEntity[]>([]);
+  const [topicId, setTopicId] = useState("");
 
   const [rowsCount, setRowsCount] = useState(0);
   const [questions, setQuestions] = useState<Question[]>([]);
@@ -133,6 +154,8 @@ export function QuestionBankPage() {
   const [isDeletingQuestions, setIsDeletingQuestions] = useState(false);
 
   const [entryMode, setEntryMode] = useState<"manual" | "upload" | "ai" | "">("");
+  const [contextLocked, setContextLocked] = useState(false);
+  const [lockedContext, setLockedContext] = useState<LockedContext | null>(null);
 
   const [questionType, setQuestionType] = useState<QuestionType>("mcq");
   const [questionText, setQuestionText] = useState("");
@@ -147,9 +170,14 @@ export function QuestionBankPage() {
   const [explanation, setExplanation] = useState("");
   const [matchingLeft, setMatchingLeft] = useState(["", "", "", ""]);
   const [matchingRight, setMatchingRight] = useState(["", "", "", ""]);
+  const [manualMode, setManualMode] = useState<"minimal" | "advanced">("minimal");
+  const [manualValidationActive, setManualValidationActive] = useState(false);
+  const [lastManualSnapshot, setLastManualSnapshot] = useState<ManualSnapshot | null>(null);
 
   const [uploadFileName, setUploadFileName] = useState("");
   const [uploadPreview, setUploadPreview] = useState<UploadPreviewRow[]>([]);
+  const [uploadStep, setUploadStep] = useState<UploadStep>("select");
+  const [uploadRowCount, setUploadRowCount] = useState(0);
   const [lastImportIds, setLastImportIds] = useState<string[]>([]);
   const [aiPdfFile, setAiPdfFile] = useState<File | null>(null);
   const [aiCount, setAiCount] = useState(10);
@@ -175,7 +203,6 @@ export function QuestionBankPage() {
   const [aiEndPage, setAiEndPage] = useState(10);
   const [rawUploadData, setRawUploadData] = useState<any[]>([]);
   const [columnMapping, setColumnMapping] = useState<Record<string, string>>({});
-  const [showMapper, setShowMapper] = useState(false);
   const [detectedHeaders, setDetectedHeaders] = useState<string[]>([]);
 
   useEffect(() => {
@@ -185,17 +212,46 @@ export function QuestionBankPage() {
   }, [chatMessages]);
 
   const step2Theme = useMemo(() => {
-    if (questionType === "mcq" || questionType === "true_false") return "border-cyan-300 bg-cyan-50";
-    if (questionType === "short" || questionType === "long") return "border-amber-300 bg-amber-50";
-    if (questionType === "diagram" || questionType === "matching") return "border-emerald-300 bg-emerald-50";
-    return "border-violet-300 bg-violet-50";
+    if (questionType === "mcq" || questionType === "true_false") return "border-cyan-300 bg-cyan-50 dark:border-cyan-500/40 dark:bg-slate-900/95";
+    if (questionType === "short" || questionType === "long") return "border-amber-300 bg-amber-50 dark:border-amber-500/40 dark:bg-slate-900/95";
+    if (questionType === "diagram" || questionType === "matching") return "border-emerald-300 bg-emerald-50 dark:border-emerald-500/40 dark:bg-slate-900/95";
+    return "border-violet-300 bg-violet-50 dark:border-violet-500/40 dark:bg-slate-900/95";
   }, [questionType]);
+
+  function renderQuestionTypeSelector() {
+    return (
+      <div className="space-y-2">
+        <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 dark:text-slate-300">Question Type</p>
+        <div className="flex flex-wrap gap-2">
+          {quickPresets.map((preset) => (
+            <button
+              key={preset.label}
+              type="button"
+              onClick={() => {
+                setQuestionType(preset.type);
+                setDiff(preset.diff);
+                setBloom(preset.bloom);
+              }}
+              className={`rounded-xl border px-3 py-2 text-xs font-bold uppercase tracking-wide transition-all ${questionType === preset.type ? "border-brand bg-brand text-white shadow-md dark:border-brand/70 dark:bg-brand/90" : "border-slate-300 bg-white text-slate-700 hover:border-brand/50 hover:bg-brand/5 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200 dark:hover:border-brand/60 dark:hover:bg-slate-700/70"}`}
+            >
+              {preset.label.replace(/_/g, " ")}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   async function fetchQuestions() {
     if (!profile?.school_id) return;
+    if (!chapterId) {
+      setQuestions([]);
+      setRowsCount(0);
+      return;
+    }
     setLoadingQuestions(true);
     try {
-      const data = await getQuestions(profile.school_id, chapterId ? [chapterId] : undefined);
+      const data = await getQuestions(profile.school_id, [chapterId]);
       setQuestions(data);
       setRowsCount(data.length);
     } finally {
@@ -211,28 +267,76 @@ export function QuestionBankPage() {
 
   const visibleSubjects = useMemo(() => subjects.filter((s) => !classId || s.class_id === classId), [subjects, classId]);
   const visibleChapters = useMemo(() => chapters.filter((c) => !subjectId || c.subject_id === subjectId), [chapters, subjectId]);
+  const visibleTopics = useMemo(() => topics.filter((t) => !chapterId || t.chapter_id === chapterId), [topics, chapterId]);
+
+  useEffect(() => {
+    if (!chapters.length) {
+      setTopics([]);
+      setTopicId("");
+      return;
+    }
+    let ignore = false;
+    getTopics(chapters.map((chapter) => chapter.id))
+      .then((rows) => {
+        if (!ignore) {
+          setTopics(rows.sort((a, b) => a.topic_number - b.topic_number));
+        }
+      })
+      .catch(() => {
+        if (!ignore) {
+          toast("error", "Failed to load topics");
+        }
+      });
+    return () => {
+      ignore = true;
+    };
+  }, [chapters]);
+
+  useEffect(() => {
+    if (!topicId) return;
+    if (!visibleTopics.some((topic) => topic.id === topicId)) {
+      setTopicId("");
+    }
+  }, [visibleTopics, topicId]);
+
   const selectedExamBodyName = examBodies.find((b) => b.id === examBodyId)?.name;
   const selectedClassName = classes.find((c) => c.id === classId)?.name;
   const selectedSubjectName = subjects.find((s) => s.id === subjectId)?.name;
   const selectedChapterName = chapterId ? chapters.find((c) => c.id === chapterId)?.title : "All Chapters";
+  const selectedTopicName = topicId ? topics.find((t) => t.id === topicId)?.title : "";
+  const activeContext = contextLocked && lockedContext ? lockedContext : { examBodyId, classId, subjectId, chapterId, topicId };
+  const activeChapterId = activeContext.chapterId;
+  const activeTopicId = activeContext.topicId || "";
+  const hasCompleteContext = Boolean(examBodyId && classId && subjectId && chapterId);
+  const canJumpToStep2 = contextLocked || hasCompleteContext;
+  const canJumpToStep3 = canJumpToStep2 && Boolean(entryMode);
+  const activeExamBodyName = examBodies.find((b) => b.id === activeContext.examBodyId)?.name || selectedExamBodyName;
+  const activeClassName = classes.find((c) => c.id === activeContext.classId)?.name || selectedClassName;
+  const activeSubjectName = subjects.find((s) => s.id === activeContext.subjectId)?.name || selectedSubjectName;
+  const activeChapterName = chapters.find((c) => c.id === activeChapterId)?.title || selectedChapterName;
+  const activeTopicName = topics.find((t) => t.id === activeTopicId)?.title || selectedTopicName || "All Topics";
 
   function applyExamBody(nextExamBodyId: string) {
     setExamBodyId(nextExamBodyId);
+    setTopicId("");
     mergeScope({ examBodyId: nextExamBodyId || undefined, classId: undefined, subjectId: undefined, chapterId: undefined });
   }
 
   function applyClass(nextClassId: string) {
     setClassId(nextClassId);
+    setTopicId("");
     mergeScope({ examBodyId: examBodyId || undefined, classId: nextClassId || undefined, subjectId: undefined, chapterId: undefined });
   }
 
   function applySubject(nextSubjectId: string) {
     setSubjectId(nextSubjectId);
+    setTopicId("");
     mergeScope({ examBodyId: examBodyId || undefined, classId: classId || undefined, subjectId: nextSubjectId || undefined, chapterId: undefined });
   }
 
   function applyChapter(nextChapterId: string) {
     setChapterId(nextChapterId);
+    setTopicId("");
     mergeScope({
       examBodyId: examBodyId || undefined,
       classId: classId || undefined,
@@ -241,6 +345,90 @@ export function QuestionBankPage() {
     });
   }
 
+  function applyTopic(nextTopicId: string) {
+    setTopicId(nextTopicId);
+  }
+
+  function lockContext() {
+    if (!examBodyId || !classId || !subjectId || !chapterId) {
+      toast("error", "Please select exam body, class, subject, and chapter");
+      return;
+    }
+    setLockedContext({ examBodyId, classId, subjectId, chapterId, topicId });
+    setContextLocked(true);
+    setStep(2);
+    toast("success", "Context locked for this question entry session");
+  }
+
+  function unlockContext(goToContext = false) {
+    setContextLocked(false);
+    setLockedContext(null);
+    if (goToContext) {
+      setStep(1);
+    }
+  }
+
+  function jumpToWizardStep(targetStep: 1 | 2 | 3) {
+    if (targetStep === 1) {
+      setStep(1);
+      return;
+    }
+    if (targetStep === 2) {
+      if (!canJumpToStep2) {
+        toast("error", "Please complete and lock context first");
+        return;
+      }
+      setStep(2);
+      return;
+    }
+    if (!canJumpToStep2) {
+      toast("error", "Please complete and lock context first");
+      return;
+    }
+    if (!entryMode) {
+      toast("error", "Please select an input method first");
+      setStep(2);
+      return;
+    }
+    setStep(3);
+  }
+
+  function getManualValidationErrors() {
+    const errors: Record<string, string> = {};
+    if (!activeChapterId) {
+      errors.context = "Select and lock a chapter before saving";
+    }
+    if (!questionText.trim()) {
+      errors.question_text = "Question text is required";
+    }
+    if (questionType === "mcq") {
+      const [oa, ob, oc, od] = options.map((x) => x.trim());
+      if (!oa) errors.option_a = "Option A is required";
+      if (!ob) errors.option_b = "Option B is required";
+      if (!oc) errors.option_c = "Option C is required";
+      if (!od) errors.option_d = "Option D is required";
+      if (!["A", "B", "C", "D"].includes(correct)) {
+        errors.correct = "Correct answer must be A, B, C, or D";
+      }
+    }
+    if (questionType === "true_false" && !["True", "False"].includes(correct)) {
+      errors.correct = "Correct answer must be True or False";
+    }
+    if ((questionType === "fill_blanks" || questionType === "matching" || questionType === "diagram") && !correct.trim()) {
+      errors.correct = "Correct answer is required";
+    }
+    if (questionType === "diagram" && !diagramUrl.trim()) {
+      errors.diagram_url = "Diagram image is required";
+    }
+    return errors;
+  }
+
+  const manualErrors = useMemo(
+    () => getManualValidationErrors(),
+    [activeChapterId, questionText, questionType, options, correct, diagramUrl]
+  );
+  const manualCanSubmit = Object.keys(manualErrors).length === 0;
+
   const filteredQuestions = useMemo(
     () =>
       questions.filter((q) => {
@@ -248,9 +436,10 @@ export function QuestionBankPage() {
         const matchesDifficulty = manageDifficulty === "all" || q.difficulty === manageDifficulty;
         const matchesType = manageType === "all" || q.question_type === manageType;
         const matchesBloom = manageBloom === "all" || (q.bloom_level || "") === manageBloom;
-        return matchesSearch && matchesDifficulty && matchesType && matchesBloom;
+        const matchesTopic = !topicId || (q.topic_id || "") === topicId;
+        return matchesSearch && matchesDifficulty && matchesType && matchesBloom && matchesTopic;
       }),
-    [questions, searchQuery, manageDifficulty, manageType, manageBloom]
+    [questions, searchQuery, manageDifficulty, manageType, manageBloom, topicId]
   );
 
   const visibleQuestionIds = useMemo(() => filteredQuestions.map((q) => q.id), [filteredQuestions]);
@@ -325,6 +514,12 @@ export function QuestionBankPage() {
     }
     setUploadPreview([]);
     setUploadFileName("");
+    setUploadStep("select");
+    setUploadRowCount(0);
+    setDetectedHeaders([]);
+    setRawUploadData([]);
+    setColumnMapping({});
+    setManualValidationActive(false);
   }, [questionType]);
 
   const correctChoices = questionType === "mcq" ? ["A", "B", "C", "D"] : questionType === "true_false" ? ["True", "False"] : [];
@@ -348,49 +543,26 @@ export function QuestionBankPage() {
       setOptions(["True", "False", "", ""]);
       setCorrect("True");
     }
+    setManualValidationActive(false);
     // NOT resetting marks, diff, bloom for "Rapid-Fire" entry
   }
 
   async function saveManual(closeAfter = false) {
-    if (!profile?.school_id || !chapterId || !questionText.trim()) {
+    setManualValidationActive(true);
+    if (!profile?.school_id || !activeChapterId) {
       toast("error", "Question text and chapter are required");
       return;
     }
-    if (questionType === "mcq") {
-      const [oa, ob, oc, od] = options.map((x) => x.trim());
-      if (!oa || !ob || !oc || !od) {
-        toast("error", "MCQ requires Option A, B, C and D");
-        return;
+    const errors = getManualValidationErrors();
+    if (Object.keys(errors).length) {
+      const firstError = Object.values(errors)[0];
+      if (firstError) {
+        toast("error", firstError);
       }
-      if (!["A", "B", "C", "D"].includes(correct)) {
-        toast("error", "MCQ correct answer must be A/B/C/D");
-        return;
-      }
-    }
-    if (questionType === "true_false") {
-      if (!["True", "False"].includes(correct)) {
-        toast("error", "True/False correct answer must be True or False");
-        return;
-      }
-    }
-    if (questionType === "fill_blanks" && !correct.trim()) {
-      toast("error", "Fill in the blanks requires correct answer");
-      return;
-    }
-    if (questionType === "matching" && !correct.trim()) {
-      toast("error", "Matching requires answer mapping (e.g. A-2;B-1)");
-      return;
-    }
-    if (questionType === "diagram" && !diagramUrl.trim()) {
-      toast("error", "Diagram image is required for diagram question type");
-      return;
-    }
-    if (questionType === "diagram" && !correct.trim()) {
-      toast("error", "Correct answer / labeling key is required for diagram questions");
       return;
     }
 
-    const duplicate = await findDuplicateQuestion(chapterId, questionText);
+    const duplicate = await findDuplicateQuestion(activeChapterId, questionText);
     if (duplicate) {
       toast("error", "Duplicate question detected in this chapter (same first 50 characters)");
       return;
@@ -407,7 +579,8 @@ export function QuestionBankPage() {
     await addQuestions([
       {
         school_id: profile.school_id,
-        chapter_id: chapterId,
+        chapter_id: activeChapterId,
+        topic_id: activeTopicId || null,
         question_type: questionType,
         question_text: formattedMatchingText,
         option_a: needsOptions ? options[0] || null : null,
@@ -423,6 +596,18 @@ export function QuestionBankPage() {
       },
     ]);
 
+    setLastManualSnapshot({
+      questionType,
+      diff,
+      bloom,
+      qLevel,
+      options: [...options],
+      correct,
+      explanation,
+      diagramUrl,
+      matchingLeft: [...matchingLeft],
+      matchingRight: [...matchingRight],
+    });
     toast("success", "Question added");
     resetManualFields();
     if (closeAfter) setEntryMode("");
@@ -479,7 +664,7 @@ export function QuestionBankPage() {
   }
 
   async function addChatQuestions(questions: AIGeneratedQuestion[]) {
-    if (!profile?.school_id || !chapterId) {
+    if (!profile?.school_id || !activeChapterId) {
       toast("error", "Please select Subject/Chapter first in Step 1");
       return;
     }
@@ -487,8 +672,9 @@ export function QuestionBankPage() {
       const mapped = questions.map(q => ({
         ...q,
         school_id: profile.school_id,
-        chapter_id: chapterId,
-        subject_id: subjectId,
+        chapter_id: activeChapterId,
+        topic_id: activeTopicId || null,
+        subject_id: activeContext.subjectId,
         difficulty: q.difficulty || aiDiff,
         bloom_level: q.bloom_level || aiBloom || undefined,
         question_level: q.question_level || aiQLevel,
@@ -554,7 +740,8 @@ export function QuestionBankPage() {
 
     const mapped: Omit<Question, "id" | "created_at"> = {
       school_id: profile!.school_id!,
-      chapter_id: chapterId,
+      chapter_id: activeChapterId,
+      topic_id: activeTopicId || null,
       question_type: questionType,
       question_text: qText,
       option_a: null,
@@ -640,6 +827,26 @@ export function QuestionBankPage() {
     setStep(3);
     setEntryMode("manual");
     toast("success", "Question cloned to form");
+  }
+
+  function clonePreviousManual() {
+    if (!lastManualSnapshot) {
+      toast("error", "No previous question available to clone");
+      return;
+    }
+    setQuestionType(lastManualSnapshot.questionType);
+    setDiff(lastManualSnapshot.diff);
+    setBloom(lastManualSnapshot.bloom);
+    setQLevel(lastManualSnapshot.qLevel);
+    setOptions([...lastManualSnapshot.options]);
+    setCorrect(lastManualSnapshot.correct);
+    setExplanation(lastManualSnapshot.explanation);
+    setDiagramUrl(lastManualSnapshot.diagramUrl);
+    setMatchingLeft([...lastManualSnapshot.matchingLeft]);
+    setMatchingRight([...lastManualSnapshot.matchingRight]);
+    setQuestionText("");
+    setManualValidationActive(false);
+    toast("success", "Previous question template loaded");
   }
 
   function handleEdit(q: Question) {
@@ -766,7 +973,10 @@ export function QuestionBankPage() {
     prepareDeleteIntent(selectedQuestionIds, `Delete ${selectedQuestionIds.length} selected question(s)?`);
   }
   async function handleFileSelection(file: File) {
-    if (!profile?.school_id || !chapterId) return;
+    if (!profile?.school_id || !activeChapterId) {
+      toast("error", "Please lock a chapter context first");
+      return;
+    }
 
     let rows: any[] = [];
     let headers: string[] = [];
@@ -787,6 +997,7 @@ export function QuestionBankPage() {
     setDetectedHeaders(headers);
     setRawUploadData(rows);
     setUploadFileName(file.name);
+    setUploadRowCount(rows.length);
 
     // Auto-detect mappings
     const initialMapping: Record<string, string> = {};
@@ -798,11 +1009,15 @@ export function QuestionBankPage() {
       if (match) initialMapping[sys] = match;
     });
     setColumnMapping(initialMapping);
-    setShowMapper(true);
+    setUploadStep("map");
     setUploadPreview([]); // Reset preview until mapping applied
   }
 
   function applyMapping() {
+    if (!columnMapping.question_text) {
+      toast("error", "Map question_text before preview");
+      return;
+    }
     const validated = rawUploadData.map((row, idx) => {
       const mappedRow: Record<string, unknown> = {
         question_text: columnMapping["question_text"] ? row[columnMapping["question_text"]] : "",
@@ -822,7 +1037,7 @@ export function QuestionBankPage() {
       return validateAndMapUploadRow(mappedRow, idx + 1);
     });
     setUploadPreview(validated);
-    setShowMapper(false);
+    setUploadStep("preview");
     toast("success", `Mapped ${validated.length} questions successfully`);
   }
 
@@ -832,7 +1047,7 @@ export function QuestionBankPage() {
       toast("error", "No valid rows to import");
       return;
     }
-    const existing = chapterId ? await getChapterQuestionsForDuplicateCheck(chapterId) : [];
+    const existing = activeChapterId ? await getChapterQuestionsForDuplicateCheck(activeChapterId) : [];
     const seenPrefixes = new Set(existing.map((q) => normalizeQuestionPrefix(q.question_text)));
     const uniqueRows: Omit<Question, "id" | "created_at">[] = [];
     let skippedDuplicates = 0;
@@ -857,7 +1072,12 @@ export function QuestionBankPage() {
     setLastImportIds(inserted.map((q) => q.id));
     toast("success", skippedDuplicates ? `${inserted.length} questions imported, ${skippedDuplicates} duplicates skipped` : `${inserted.length} questions imported`);
     setUploadFileName("");
+    setUploadRowCount(0);
     setUploadPreview([]);
+    setUploadStep("select");
+    setRawUploadData([]);
+    setDetectedHeaders([]);
+    setColumnMapping({});
     fetchQuestions();
   }
 
@@ -900,7 +1120,7 @@ export function QuestionBankPage() {
   }
 
   async function saveAIGenerated() {
-    if (!profile?.school_id || !chapterId || !aiGenerated.length) {
+    if (!profile?.school_id || !activeChapterId || !aiGenerated.length) {
       toast("error", "No AI generated questions to save");
       return;
     }
@@ -909,7 +1129,8 @@ export function QuestionBankPage() {
       .map((q) => {
         const base: Omit<Question, "id" | "created_at"> = {
           school_id: profile.school_id!,
-          chapter_id: chapterId,
+          chapter_id: activeChapterId,
+          topic_id: activeTopicId || null,
           question_type: questionType,
           question_text: q.question_text?.trim() || "",
           option_a: null,
@@ -946,7 +1167,7 @@ export function QuestionBankPage() {
       return;
     }
 
-    const existing = chapterId ? await getChapterQuestionsForDuplicateCheck(chapterId) : [];
+    const existing = activeChapterId ? await getChapterQuestionsForDuplicateCheck(activeChapterId) : [];
     const seenPrefixes = new Set(existing.map((q) => normalizeQuestionPrefix(q.question_text)));
     const uniquePayload: Omit<Question, "id" | "created_at">[] = [];
     let skippedDuplicates = 0;
@@ -996,55 +1217,6 @@ export function QuestionBankPage() {
           </button>
         </div>
       </div>
-      <ContextBreadcrumbs
-        items={[
-          {
-            label: "Exam Body",
-            value: selectedExamBodyName || "All Exam Bodies",
-            selected: !!examBodyId,
-            count: examBodies.length,
-            onSelect: () => navigate({ pathname: "/exam-bodies", search: hierarchyScopeToSearch(scopeToLevel("examBodyId")) }),
-            onClear: () => {
-              setExamBodyId("");
-              clearFrom("examBodyId");
-            },
-          },
-          {
-            label: "Class",
-            value: selectedClassName || "All Classes",
-            selected: !!classId,
-            count: classes.length,
-            onSelect: () => navigate({ pathname: "/classes", search: hierarchyScopeToSearch(scopeToLevel("classId")) }),
-            onClear: () => {
-              setClassId("");
-              clearFrom("classId");
-            },
-          },
-          {
-            label: "Subject",
-            value: selectedSubjectName || "All Subjects",
-            selected: !!subjectId,
-            count: visibleSubjects.length,
-            onSelect: () => navigate({ pathname: "/subjects", search: hierarchyScopeToSearch(scopeToLevel("subjectId")) }),
-            onClear: () => {
-              setSubjectId("");
-              clearFrom("subjectId");
-            },
-          },
-          {
-            label: "Chapter",
-            value: selectedChapterName || "All Chapters",
-            selected: !!chapterId,
-            count: visibleChapters.length,
-            onSelect: () => navigate({ pathname: "/chapters", search: hierarchyScopeToSearch(scopeToLevel("chapterId")) }),
-            onClear: () => {
-              setChapterId("");
-              clearFrom("chapterId");
-            },
-          },
-        ]}
-      />
-
       {viewMode === "manage" ? (
         <>
           <div className="sticky top-2 z-10 space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -1052,7 +1224,7 @@ export function QuestionBankPage() {
               <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Active Context</p>
               <button onClick={() => setViewMode("add")} className="text-xs font-bold text-brand hover:underline">+ Add New From This Context</button>
             </div>
-            <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-4">
+            <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-5">
               <label className="text-xs font-semibold text-slate-600">Exam Body
                 <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={examBodyId} onChange={(e) => applyExamBody(e.target.value)}>
                   <option value="">All Exam Bodies</option>
@@ -1075,6 +1247,12 @@ export function QuestionBankPage() {
                 <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={chapterId} onChange={(e) => applyChapter(e.target.value)}>
                   <option value="">All Chapters</option>
                   {visibleChapters.map((c) => <option key={c.id} value={c.id}>{c.title}</option>)}
+                </select>
+              </label>
+              <label className="text-xs font-semibold text-slate-600">Topic
+                <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={topicId} onChange={(e) => applyTopic(e.target.value)} disabled={!chapterId}>
+                  <option value="">{chapterId ? "All Topics" : "Select Chapter First"}</option>
+                  {visibleTopics.map((t) => <option key={t.id} value={t.id}>{`${t.topic_number}. ${t.title}`}</option>)}
                 </select>
               </label>
             </div>
@@ -1158,6 +1336,11 @@ export function QuestionBankPage() {
             )}
 
             <div className="overflow-x-auto overflow-y-visible rounded-xl border border-slate-200 bg-white">
+              {!chapterId && (
+                <div className="border-b border-slate-200 bg-amber-50 px-4 py-2 text-xs font-semibold text-amber-700">
+                  Select a chapter in Active Context to load questions quickly.
+                </div>
+              )}
               <table className="min-w-full text-sm">
                 <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
                   <tr>
@@ -1215,6 +1398,7 @@ export function QuestionBankPage() {
                               <p><span className="font-bold text-slate-700">Difficulty:</span> {q.difficulty}</p>
                               <p><span className="font-bold text-slate-700">Bloom:</span> {q.bloom_level || "--"}</p>
                               <p><span className="font-bold text-slate-700">Level:</span> {q.question_level}</p>
+                              <p><span className="font-bold text-slate-700">Topic:</span> {topics.find((t) => t.id === q.topic_id)?.title || "--"}</p>
                             </div>
                           </div>
                         </div>
@@ -1225,6 +1409,7 @@ export function QuestionBankPage() {
                             {q.difficulty}
                           </span>
                           <p className="text-[10px] font-semibold uppercase text-slate-500">{q.bloom_level || "no bloom"}</p>
+                          <p className="text-[10px] font-semibold text-slate-500">{topics.find((t) => t.id === q.topic_id)?.title || "No topic"}</p>
                         </div>
                       </td>
                       <td className="px-3 py-3">
@@ -1262,20 +1447,56 @@ export function QuestionBankPage() {
               { n: 3, label: "Review & Save" }
             ].map((s) => (
               <div key={s.n} className="flex items-center space-x-2">
-                <div className={`flex h-8 w-8 items-center justify-center rounded-full text-xs font-bold transition-all ${step === s.n ? "bg-brand text-white ring-4 ring-brand/10 scale-110" : step > s.n ? "bg-emerald-500 text-white" : "bg-slate-200 text-slate-500"}`}>
-                  {step > s.n ? <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7" /></svg> : s.n}
-                </div>
-                <span className={`text-xs font-bold uppercase tracking-tight ${step === s.n ? "text-brand" : "text-slate-400"}`}>{s.label}</span>
+                <button
+                  type="button"
+                  onClick={() => jumpToWizardStep(s.n as 1 | 2 | 3)}
+                  disabled={(s.n === 2 && !canJumpToStep2) || (s.n === 3 && !canJumpToStep3)}
+                  className={`group flex items-center space-x-2 rounded-xl px-2 py-1 transition-all ${(s.n === 2 && !canJumpToStep2) || (s.n === 3 && !canJumpToStep3) ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:bg-slate-100/60 dark:hover:bg-slate-800/60"}`}
+                >
+                  <div className={`flex h-8 w-8 items-center justify-center rounded-full text-xs font-bold transition-all ${step === s.n ? "bg-brand text-white ring-4 ring-brand/10 scale-110" : step > s.n ? "bg-emerald-500 text-white" : "bg-slate-200 text-slate-500 dark:bg-slate-700 dark:text-slate-300"}`}>
+                    {step > s.n ? <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7" /></svg> : s.n}
+                  </div>
+                  <span className={`text-xs font-bold uppercase tracking-tight transition-colors ${step === s.n ? "text-brand" : "text-slate-400 group-hover:text-slate-600 dark:text-slate-400 dark:group-hover:text-slate-200"}`}>{s.label}</span>
+                </button>
                 {s.n < 3 && <div className="h-[2px] w-8 bg-slate-200" />}
               </div>
             ))}
           </div>
 
+          {contextLocked && lockedContext && (
+            <div className="sticky top-2 z-20 rounded-2xl border border-brand/20 bg-brand/5 px-4 py-3 shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-brand">Context Locked</p>
+                  <p className="text-xs font-semibold text-slate-700">
+                    {activeExamBodyName || "Exam Body"} / {activeClassName || "Class"} / {activeSubjectName || "Subject"} / {activeChapterName || "Chapter"} / {activeTopicName}
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => unlockContext(true)}
+                    className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-[11px] font-bold uppercase tracking-wide text-slate-700 hover:bg-slate-50"
+                  >
+                    Change Context
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => unlockContext(false)}
+                    className="rounded-lg bg-slate-700 px-3 py-1.5 text-[11px] font-bold uppercase tracking-wide text-white hover:bg-slate-800"
+                  >
+                    Unlock
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {step === 1 && (
             <div className="space-y-4 rounded-3xl border border-slate-200 bg-white p-8 shadow-xl shadow-slate-200/50 transition-all animate-in fade-in slide-in-from-bottom-4">
               <div className="space-y-1">
                 <h3 className="font-display text-xl font-bold">Where would you like to add questions?</h3>
-                <p className="text-sm text-slate-500">Select the book and chapter to ensure AI and Uploads are correctly assigned.</p>
+                <p className="text-sm text-slate-500">Select exam body, class, subject, chapter and optional topic so manual/AI/upload entries are tagged correctly.</p>
               </div>
               <div className="grid gap-4 md:grid-cols-2">
                 <label className="space-y-1">
@@ -1306,10 +1527,22 @@ export function QuestionBankPage() {
                     {visibleChapters.map((c) => <option key={c.id} value={c.id}>{c.title}</option>)}
                   </select>
                 </label>
+                <label className="space-y-1 md:col-span-2">
+                  <span className="text-xs font-bold uppercase text-slate-500">Topic (Optional)</span>
+                  <select
+                    className="flex h-12 w-full items-center rounded-xl border border-slate-300 bg-slate-50 px-4 text-sm font-medium focus:border-brand focus:ring-1 focus:ring-brand"
+                    value={topicId}
+                    onChange={(e) => applyTopic(e.target.value)}
+                    disabled={!chapterId}
+                  >
+                    <option value="">{chapterId ? "All Topics in this Chapter" : "Select chapter first"}</option>
+                    {visibleTopics.map((t) => <option key={t.id} value={t.id}>{`${t.topic_number}. ${t.title}`}</option>)}
+                  </select>
+                </label>
               </div>
               <div className="flex justify-end pt-4">
-                <button onClick={() => { if (!chapterId) toast("error", "Select a chapter first"); else setStep(2); }} className="flex items-center gap-2 rounded-xl bg-brand px-8 py-3 font-bold text-white shadow-lg shadow-brand/20 transition-transform active:scale-95">
-                  Continue to Input
+                <button type="button" onClick={lockContext} className="flex items-center gap-2 rounded-xl bg-brand px-8 py-3 font-bold text-white shadow-lg shadow-brand/20 transition-transform active:scale-95">
+                  Lock Context & Continue
                   <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 5l7 7m0 0l-7 7m7-7H3" /></svg>
                 </button>
               </div>
@@ -1319,33 +1552,27 @@ export function QuestionBankPage() {
           {step === 2 && (
             <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4">
               <div className="flex items-center justify-between px-2">
-                <button onClick={() => setStep(1)} className="flex items-center gap-1 text-xs font-bold text-slate-500 hover:text-slate-900">
-                  <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
-                  BACK TO CONTEXT
-                </button>
+                {contextLocked ? (
+                  <button onClick={() => unlockContext(true)} className="flex items-center gap-1 text-xs font-bold text-slate-500 hover:text-slate-900 dark:text-slate-300 dark:hover:text-white">
+                    <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
+                    CHANGE CONTEXT
+                  </button>
+                ) : (
+                  <button onClick={() => setStep(1)} className="flex items-center gap-1 text-xs font-bold text-slate-500 hover:text-slate-900 dark:text-slate-300 dark:hover:text-white">
+                    <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
+                    BACK TO CONTEXT
+                  </button>
+                )}
                 <div className="text-right">
-                  <p className="text-[10px] font-bold uppercase text-slate-400">Context</p>
-                  <p className="text-xs font-bold text-slate-600">{chapters.find(c => c.id === chapterId)?.title}</p>
+                  <p className="text-[10px] font-bold uppercase text-slate-400 dark:text-slate-400">Context</p>
+                  <p className="text-xs font-bold text-slate-600 dark:text-slate-200">{activeChapterName} / {activeTopicName}</p>
                 </div>
               </div>
 
               <div className={`space-y-4 rounded-3xl border p-8 shadow-lg ${step2Theme}`}>
                 <div className="space-y-1">
-                  <h3 className="font-display text-xl font-bold">Choose your input method</h3>
-                  <p className="text-sm text-slate-600">Select a question type and how you want to add it.</p>
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                  {quickPresets.map((preset) => (
-                    <button
-                      key={preset.label}
-                      type="button"
-                      onClick={() => { setQuestionType(preset.type); setDiff(preset.diff); setBloom(preset.bloom); }}
-                      className={`flex flex-col items-center gap-1 rounded-2xl border-2 px-6 py-4 transition-all ${questionType === preset.type ? "border-brand bg-white text-brand shadow-md scale-105" : "border-transparent bg-white/50 text-slate-600 hover:bg-white"}`}
-                    >
-                      <span className="text-xs font-bold uppercase tracking-widest">{preset.label}</span>
-                    </button>
-                  ))}
+                  <h3 className="font-display text-xl font-bold text-slate-900 dark:text-slate-100">Choose your input method</h3>
+                  <p className="text-sm text-slate-600 dark:text-slate-300">Select how you want to add questions.</p>
                 </div>
 
                 <div className="grid gap-3 pt-4 sm:grid-cols-3">
@@ -1357,11 +1584,11 @@ export function QuestionBankPage() {
                     <button
                       key={mode.id}
                       onClick={() => { setEntryMode(mode.id as any); setStep(3); }}
-                      className={`relative flex flex-col items-start gap-1 rounded-2xl border-2 p-4 text-left transition-all ${entryMode === mode.id ? "border-brand bg-white shadow-md ring-4 ring-brand/5" : "border-transparent bg-white/50 hover:bg-white"}`}
+                      className={`relative flex flex-col items-start gap-1 rounded-2xl border-2 p-4 text-left transition-all ${entryMode === mode.id ? "border-brand bg-white shadow-md ring-4 ring-brand/5 dark:border-brand/70 dark:bg-slate-900 dark:ring-brand/20" : "border-transparent bg-white/50 hover:bg-white dark:border-slate-700/50 dark:bg-slate-800/80 dark:hover:bg-slate-800"}`}
                     >
                       <span className="text-xl">{mode.icon}</span>
-                      <p className="text-sm font-bold text-slate-900">{mode.label}</p>
-                      <p className="text-[10px] text-slate-500 uppercase font-bold">{mode.desc}</p>
+                      <p className="text-sm font-bold text-slate-900 dark:text-slate-100">{mode.label}</p>
+                      <p className="text-[10px] text-slate-500 uppercase font-bold dark:text-slate-300">{mode.desc}</p>
                       {entryMode === mode.id && <div className="absolute right-3 top-3"><div className="h-2 w-2 rounded-full bg-brand" /></div>}
                     </button>
                   ))}
@@ -1385,14 +1612,41 @@ export function QuestionBankPage() {
 
               {entryMode === "manual" && (
                 <form onSubmit={onManualSubmit} className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
-                  {/* Existing Manual Form */}
-                  <p className="text-xs font-semibold text-slate-500">Manual Entry Content</p>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs font-semibold text-slate-500">Manual Entry</p>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setManualMode("minimal")}
+                        className={`rounded-full px-3 py-1 text-[11px] font-bold ${manualMode === "minimal" ? "bg-brand text-white" : "bg-slate-100 text-slate-700"}`}
+                      >
+                        Minimal
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setManualMode("advanced")}
+                        className={`rounded-full px-3 py-1 text-[11px] font-bold ${manualMode === "advanced" ? "bg-brand text-white" : "bg-slate-100 text-slate-700"}`}
+                      >
+                        Advanced
+                      </button>
+                      <button
+                        type="button"
+                        onClick={clonePreviousManual}
+                        className="rounded-full border border-slate-300 bg-white px-3 py-1 text-[11px] font-bold text-slate-700 hover:bg-slate-50"
+                      >
+                        Clone Previous
+                      </button>
+                    </div>
+                  </div>
+
+                  {renderQuestionTypeSelector()}
                   <p className="rounded-lg bg-slate-100 px-3 py-2 text-xs text-slate-600">{typeHints[questionType]}</p>
+                  {manualValidationActive && manualErrors.context && <p className="text-xs font-semibold text-red-600">{manualErrors.context}</p>}
 
                   <div className="flex items-center justify-between">
                     <label className="text-xs font-semibold text-slate-600">Question Text</label>
                     <button type="button" onClick={() => setShowPreview(!showPreview)} className="text-[10px] font-bold text-brand uppercase hover:underline">
-                      {showPreview ? "⌨️ Show Editor" : "👁️ Show Preview"}
+                      {showPreview ? "Show Editor" : "Show Preview"}
                     </button>
                   </div>
                   {showPreview ? (
@@ -1408,18 +1662,58 @@ export function QuestionBankPage() {
                       ))}
                     </div>
                   ) : (
-                    <textarea className="mt-1 h-24 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm" value={questionText} onChange={(e) => setQuestionText(e.target.value)} onKeyDown={onManualKeyDown} placeholder="Tip: Use **bold** for emphasis and $formula$ for variables." />
+                    <textarea
+                      className="mt-1 h-24 w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm"
+                      value={questionText}
+                      onChange={(e) => setQuestionText(e.target.value)}
+                      onKeyDown={onManualKeyDown}
+                      placeholder="Tip: Use **bold** for emphasis and $formula$ for variables."
+                    />
                   )}
+                  {manualValidationActive && manualErrors.question_text && <p className="text-xs font-semibold text-red-600">{manualErrors.question_text}</p>}
 
                   {needsOptions ? (
                     <div className="grid gap-2 md:grid-cols-2">
-                      {options.slice(0, visibleOptionCount).map((opt, i) => (
-                        <label key={i} className="text-xs font-semibold text-slate-600">Option {String.fromCharCode(65 + i)}
-                          <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={opt} onChange={(e) => setOptions((prev) => prev.map((x, idx) => idx === i ? e.target.value : x))} />
-                        </label>
-                      ))}
+                      {options.slice(0, visibleOptionCount).map((opt, i) => {
+                        const optionKey = `option_${String.fromCharCode(97 + i)}` as "option_a" | "option_b" | "option_c" | "option_d";
+                        return (
+                          <label key={i} className="text-xs font-semibold text-slate-600">
+                            Option {String.fromCharCode(65 + i)}
+                            <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={opt} onChange={(e) => setOptions((prev) => prev.map((x, idx) => idx === i ? e.target.value : x))} />
+                            {manualValidationActive && manualErrors[optionKey] && <p className="mt-1 text-[11px] font-semibold text-red-600">{manualErrors[optionKey]}</p>}
+                          </label>
+                        );
+                      })}
                     </div>
                   ) : null}
+
+                  {questionType === "matching" && manualMode === "advanced" && (
+                    <div className="rounded-lg border border-slate-200 p-3">
+                      <p className="mb-2 text-xs font-semibold text-slate-600">Matching Pair Helper (Optional)</p>
+                      <div className="grid gap-2 md:grid-cols-2">
+                        {matchingLeft.map((left, i) => (
+                          <label key={`left-${i}`} className="text-xs font-semibold text-slate-600">
+                            Column A {String.fromCharCode(65 + i)}
+                            <input
+                              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
+                              value={left}
+                              onChange={(e) => setMatchingLeft((prev) => prev.map((item, idx) => (idx === i ? e.target.value : item)))}
+                            />
+                          </label>
+                        ))}
+                        {matchingRight.map((right, i) => (
+                          <label key={`right-${i}`} className="text-xs font-semibold text-slate-600">
+                            Column B {i + 1}
+                            <input
+                              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
+                              value={right}
+                              onChange={(e) => setMatchingRight((prev) => prev.map((item, idx) => (idx === i ? e.target.value : item)))}
+                            />
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {questionType === "diagram" && (
                     <div className="space-y-2 rounded-lg border border-slate-200 p-3">
@@ -1434,6 +1728,7 @@ export function QuestionBankPage() {
                         <input className="mt-1 block w-full text-sm" type="file" onChange={(e) => e.target.files?.[0] && handleDiagramFile(e.target.files[0])} />
                       )}
                       {diagramUrl && <img src={diagramUrl} alt="Preview" className="max-h-32 rounded border" />}
+                      {manualValidationActive && manualErrors.diagram_url && <p className="text-xs font-semibold text-red-600">{manualErrors.diagram_url}</p>}
                     </div>
                   )}
 
@@ -1441,29 +1736,51 @@ export function QuestionBankPage() {
                     {needsCorrect && (
                       <label className="text-xs font-semibold text-slate-600">Correct Answer
                         {["mcq", "true_false"].includes(questionType) ? (
-                          <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={correct} onChange={(e) => setCorrect(e.target.value)}>{correctChoices.map(x => <option key={x}>{x}</option>)}</select>
+                          <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={correct} onChange={(e) => setCorrect(e.target.value)}>{correctChoices.map((x) => <option key={x}>{x}</option>)}</select>
                         ) : (
                           <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={correct} onChange={(e) => setCorrect(e.target.value)} />
                         )}
+                        {manualValidationActive && manualErrors.correct && <p className="mt-1 text-[11px] font-semibold text-red-600">{manualErrors.correct}</p>}
                       </label>
                     )}
-                    <label className="text-xs font-semibold text-slate-600">Difficulty<select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={diff} onChange={(e) => setDiff(e.target.value as Difficulty)}>{difficultyLevels.map(x => <option key={x}>{x}</option>)}</select></label>
-                    <label className="text-xs font-semibold text-slate-600">Bloom Level
-                      <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={bloom} onChange={(e) => setBloom(e.target.value as any)}>
-                        <option value="">-- Optional --</option>
-                        {blooms.map(x => <option key={x} value={x}>{x}</option>)}
-                      </select>
+                    <label className="text-xs font-semibold text-slate-600">Difficulty
+                      <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={diff} onChange={(e) => setDiff(e.target.value as Difficulty)}>{difficultyLevels.map((x) => <option key={x}>{x}</option>)}</select>
                     </label>
-                    <label className="text-xs font-semibold text-slate-600">Question Level
-                      <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={qLevel} onChange={(e) => setQLevel(e.target.value as QuestionLevel)}>
-                        {questionLevels.map(x => <option key={x.id} value={x.id}>{x.label}</option>)}
-                      </select>
-                    </label>
+                    {manualMode === "advanced" && (
+                      <label className="text-xs font-semibold text-slate-600">Bloom Level
+                        <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={bloom} onChange={(e) => setBloom(e.target.value as any)}>
+                          <option value="">-- Optional --</option>
+                          {blooms.map((x) => <option key={x} value={x}>{x}</option>)}
+                        </select>
+                      </label>
+                    )}
+                    {manualMode === "advanced" && (
+                      <label className="text-xs font-semibold text-slate-600">Question Level
+                        <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={qLevel} onChange={(e) => setQLevel(e.target.value as QuestionLevel)}>
+                          {questionLevels.map((x) => <option key={x.id} value={x.id}>{x.label}</option>)}
+                        </select>
+                      </label>
+                    )}
                   </div>
+
+                  {manualMode === "advanced" && (
+                    <label className="block text-xs font-semibold text-slate-600">
+                      Explanation / Rubric Hint (Optional)
+                      <textarea
+                        className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                        rows={3}
+                        value={explanation}
+                        onChange={(e) => setExplanation(e.target.value)}
+                      />
+                    </label>
+                  )}
 
                   <div className="flex gap-2">
                     <button type="submit" className="rounded-lg bg-brand px-4 py-2 text-white">Save & Add Another</button>
                     <button type="button" onClick={() => saveManual(true)} className="rounded-lg bg-slate-700 px-4 py-2 text-white">Save & Close</button>
+                    {manualValidationActive && !manualCanSubmit && (
+                      <p className="self-center text-xs font-semibold text-red-600">Please fix highlighted fields.</p>
+                    )}
                   </div>
                 </form>
               )}
@@ -1472,24 +1789,60 @@ export function QuestionBankPage() {
                 <div className="space-y-4 rounded-3xl border border-slate-200 bg-white p-8 shadow-xl">
                   <div className="space-y-1">
                     <h3 className="font-display text-xl font-bold">Smart Bulk Upload</h3>
-                    <div className="flex items-center justify-between">
-                      <p className="text-sm text-slate-500">Drag and drop your file. We'll help you map the columns.</p>
-                      <button
-                        type="button"
-                        onClick={() => downloadQuestionTemplate(questionType)}
-                        className="flex items-center gap-2 rounded-lg border border-brand/20 bg-brand/5 px-3 py-1.5 text-[10px] font-bold text-brand uppercase transition-all hover:bg-brand/10"
-                      >
-                        <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
-                        Download {questionType.replace("_", " ")} Template
-                      </button>
-                    </div>
+                    <p className="text-sm text-slate-500">Step-by-step import: select file, map columns, preview rows, then confirm upload.</p>
                   </div>
 
-                  {!showMapper && uploadPreview.length === 0 && (
+                  {renderQuestionTypeSelector()}
+
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    {[
+                      { id: "select", label: "1. Select File" },
+                      { id: "map", label: "2. Map Columns" },
+                      { id: "preview", label: "3. Preview & Submit" },
+                    ].map((stage) => (
+                      <div
+                        key={stage.id}
+                        className={`rounded-xl border px-3 py-2 text-xs font-bold uppercase tracking-wide ${uploadStep === stage.id ? "border-brand bg-brand/10 text-brand" : "border-slate-200 bg-slate-50 text-slate-500"}`}
+                      >
+                        {stage.label}
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => downloadQuestionTemplate(questionType)}
+                      className="rounded-lg border border-brand/20 bg-brand/5 px-3 py-1.5 text-[10px] font-bold uppercase text-brand hover:bg-brand/10"
+                    >
+                      Download {questionType.replace("_", " ")} Template
+                    </button>
+                    <button
+                      type="button"
+                      onClick={undoLastImport}
+                      className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[10px] font-bold uppercase text-slate-600 hover:bg-slate-50"
+                    >
+                      Undo Last Upload
+                    </button>
+                  </div>
+
+                  {!!uploadFileName && (
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                      <p className="text-xs font-bold text-slate-700">Selected File: {uploadFileName}</p>
+                      <p className="text-xs text-slate-500">Detected Rows: {uploadRowCount}</p>
+                    </div>
+                  )}
+
+                  {uploadStep === "select" && (
                     <div
                       onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add("border-brand", "bg-brand/5"); }}
                       onDragLeave={(e) => { e.preventDefault(); e.currentTarget.classList.remove("border-brand", "bg-brand/5"); }}
-                      onDrop={(e) => { e.preventDefault(); e.currentTarget.classList.remove("border-brand", "bg-brand/5"); const file = e.dataTransfer.files[0]; if (file) handleFileSelection(file); }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        e.currentTarget.classList.remove("border-brand", "bg-brand/5");
+                        const file = e.dataTransfer.files[0];
+                        if (file) handleFileSelection(file);
+                      }}
                       className="group relative flex h-48 cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-300 bg-slate-50 transition-all hover:border-brand hover:bg-brand/5"
                     >
                       <div className="flex flex-col items-center gap-2 text-slate-400 group-hover:text-brand">
@@ -1501,51 +1854,101 @@ export function QuestionBankPage() {
                     </div>
                   )}
 
-                  {showMapper && (
+                  {uploadStep === "map" && (
                     <div className="space-y-4 animate-in fade-in zoom-in-95">
                       <div className="rounded-xl bg-brand/5 p-4">
-                        <p className="text-xs font-bold text-brand uppercase tracking-widest">Column Mapping Required</p>
-                        <p className="text-xs text-brand/70">Match your file's headers to our system fields.</p>
+                        <p className="text-xs font-bold text-brand uppercase tracking-widest">Column Mapping</p>
+                        <p className="text-xs text-brand/70">Map your file headers with required fields. `question_text` is mandatory.</p>
                       </div>
                       <div className="grid gap-4 md:grid-cols-2">
-                        {["question_text", "correct_answer", "difficulty", "bloom_level"].map(sys => (
+                        {["question_text", "correct_answer", "difficulty", "bloom_level", ...(questionType === "mcq" ? ["option_a", "option_b", "option_c", "option_d"] : [])].map((sys) => (
                           <label key={sys} className="flex flex-col gap-1">
                             <span className="text-[10px] font-bold uppercase text-slate-500">{sys.replace("_", " ")}</span>
                             <select
                               className="h-10 rounded-lg border border-slate-300 bg-white px-3 text-xs font-semibold"
                               value={columnMapping[sys] || ""}
-                              onChange={(e) => setColumnMapping(prev => ({ ...prev, [sys]: e.target.value }))}
+                              onChange={(e) => setColumnMapping((prev) => ({ ...prev, [sys]: e.target.value }))}
                             >
                               <option value="">-- Ignored --</option>
-                              {detectedHeaders.map(h => <option key={h} value={h}>{h}</option>)}
+                              {detectedHeaders.map((h) => <option key={h} value={h}>{h}</option>)}
                             </select>
                           </label>
                         ))}
                       </div>
-                      <button onClick={applyMapping} className="w-full rounded-xl bg-brand py-3 font-bold text-white shadow-lg shadow-brand/20">
-                        Continue to Preview
-                      </button>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setUploadStep("select");
+                            setUploadPreview([]);
+                          }}
+                          className="flex-1 rounded-xl border border-slate-300 bg-white py-3 text-xs font-bold uppercase text-slate-600 hover:bg-slate-50"
+                        >
+                          Back
+                        </button>
+                        <button type="button" onClick={applyMapping} className="flex-1 rounded-xl bg-brand py-3 text-xs font-bold uppercase text-white shadow-lg shadow-brand/20">
+                          Continue to Preview
+                        </button>
+                      </div>
                     </div>
                   )}
 
-                  {uploadPreview.length > 0 && !showMapper && (
+                  {uploadStep === "preview" && (
                     <div className="space-y-4">
                       <div className="flex items-center justify-between rounded-xl bg-emerald-50 p-4">
                         <div>
-                          <p className="text-xs font-bold text-emerald-700 uppercase">Ready to Import</p>
-                          <p className="text-sm font-bold text-emerald-900">{uploadPreview.length} questions detected from your file.</p>
+                          <p className="text-xs font-bold text-emerald-700 uppercase">Preview Ready</p>
+                          <p className="text-sm font-bold text-emerald-900">
+                            Valid: {uploadPreview.filter((x) => x.status === "valid").length} | Errors: {uploadPreview.filter((x) => x.status === "error").length}
+                          </p>
                         </div>
-                        <button onClick={() => { setUploadPreview([]); setRawUploadData([]); }} className="text-xs font-bold text-slate-400 hover:text-slate-600">RESET</button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setUploadPreview([]);
+                            setRawUploadData([]);
+                            setDetectedHeaders([]);
+                            setColumnMapping({});
+                            setUploadFileName("");
+                            setUploadRowCount(0);
+                            setUploadStep("select");
+                          }}
+                          className="text-xs font-bold text-slate-400 hover:text-slate-600"
+                        >
+                          Reset
+                        </button>
                       </div>
 
-                      <button onClick={submitUpload} className="w-full rounded-xl bg-brand py-3 font-bold text-white shadow-lg shadow-brand/20 transition-transform active:scale-95">
-                        Import All Questions
+                      <div className="max-h-56 overflow-auto rounded-xl border border-slate-200">
+                        <table className="w-full text-left text-xs">
+                          <thead className="bg-slate-50 text-slate-500">
+                            <tr>
+                              <th className="px-3 py-2">Row</th>
+                              <th className="px-3 py-2">Question</th>
+                              <th className="px-3 py-2">Status</th>
+                              <th className="px-3 py-2">Message</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {uploadPreview.slice(0, 30).map((row) => (
+                              <tr key={row.index} className="border-t border-slate-100">
+                                <td className="px-3 py-2">{row.index}</td>
+                                <td className="px-3 py-2">{row.questionText || "--"}</td>
+                                <td className="px-3 py-2">
+                                  <span className={`rounded px-2 py-0.5 font-bold ${row.status === "valid" ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"}`}>
+                                    {row.status}
+                                  </span>
+                                </td>
+                                <td className="px-3 py-2">{row.message}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      <button type="button" onClick={submitUpload} className="w-full rounded-xl bg-brand py-3 font-bold text-white shadow-lg shadow-brand/20 transition-transform active:scale-95">
+                        Submit Upload
                       </button>
-
-                      <div className="flex gap-2">
-                        <button onClick={() => downloadTemplate(questionType)} className="flex-1 rounded-lg border border-slate-200 py-2 text-xs font-bold text-slate-500 hover:bg-slate-50">Download Template</button>
-                        <button onClick={undoLastImport} className="flex-1 rounded-lg border border-slate-200 py-2 text-xs font-bold text-slate-500 hover:bg-slate-50">Undo Last Upload</button>
-                      </div>
                     </div>
                   )}
                 </div>
@@ -1553,6 +1956,7 @@ export function QuestionBankPage() {
 
               {entryMode === "ai" && (
                 <div className="space-y-4 rounded-xl border border-slate-200 bg-white p-4">
+                  {renderQuestionTypeSelector()}
                   <div className="flex items-center justify-between">
                     <p className="text-xs font-semibold text-slate-500 uppercase tracking-widest">AI Generation Strategy</p>
                     <button

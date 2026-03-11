@@ -52,9 +52,18 @@ export type ChapterEntity = {
   created_at: string;
 };
 
+export type TopicEntity = {
+  id: string;
+  chapter_id: string;
+  title: string;
+  topic_number: number;
+  created_at: string;
+};
+
 export type Question = {
   id: string;
   chapter_id: string;
+  topic_id?: string | null;
   school_id: string;
   question_type: QuestionType;
   question_text: string;
@@ -141,6 +150,7 @@ export type GeneratorSettings = {
   classId: string;
   subjectId: string;
   chapterIds: string[];
+  topicIds?: string[];
   examType: ExamType;
   blueprintId?: string;
   sets: number;
