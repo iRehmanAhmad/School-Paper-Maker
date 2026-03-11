@@ -90,10 +90,6 @@ export async function getPaperBundleById(paperId: string): Promise<any | null> {
     }, {} as Record<string, PaperQuestion[]>);
 
     const settings = paper.settings_json as any;
-    console.log("[DEBUG] Reconstructing Paper:", paperId);
-    console.log("[DEBUG] Mappings found:", mappings.length);
-    console.log("[DEBUG] Questions found from DB:", questionsMap.size);
-    console.log("[DEBUG] Settings JSON structure:", JSON.stringify(settings, null, 2));
 
     const sets = Object.entries(setGroups).map(([setId, setMappings]) => {
         const sortedMappings = [...setMappings].sort((a, b) => a.order_number - b.order_number);
@@ -101,7 +97,6 @@ export async function getPaperBundleById(paperId: string): Promise<any | null> {
         const generatedQs = sortedMappings.map((m) => {
             const q = questionsMap.get(m.question_id);
             if (!q) {
-                console.log("[DEBUG] Question missing from map for ID:", m.question_id);
                 return null;
             }
 

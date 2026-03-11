@@ -99,8 +99,10 @@ export type UserProfile = {
   role: UserRole;
   school_id: string | null;
   full_name: string;
-  // Local/demo auth password. In Supabase auth mode, password is handled by auth.users.
+  // Temporary input field (not persisted for production auth).
   password?: string;
+  // Local/demo fallback hash. In Supabase auth mode, password is handled by auth.users.
+  password_hash?: string;
   is_premium?: boolean;
   created_at: string;
 };

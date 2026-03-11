@@ -117,17 +117,39 @@ export function AppLayout() {
   );
 }
 
+type SavedPaperItem = {
+  id: string;
+  createdAt: string;
+  paperName: string;
+  subjectName: string;
+  totalMarks: number;
+};
+
 function SavedPapersWidget({ teacherId }: { teacherId: string }) {
-  const [papers, setPapers] = useState<any[]>([]);
+  const [papers, setPapers] = useState<SavedPaperItem[]>([]);
+  const [sortBy, setSortBy] = useState<"date_desc" | "date_asc" | "name_asc" | "name_desc">("date_desc");
+  const [subjectFilter, setSubjectFilter] = useState<string>("all");
+  const [groupBy, setGroupBy] = useState<"none" | "subject">("none");
 
   const loadPapers = useCallback(async () => {
-    // We import inline to avoid circular dependencies if any, or just use localStorage directly since service requires async handling
     try {
       const { getPapersByTeacher } = await import("@/services/paperService");
       const list = await getPapersByTeacher(teacherId);
-      // Only show papers that have a custom paperName saved
-      const namedPapers = list.filter((p) => (p.settings_json as any)?.header?.paperName);
-      setPapers(namedPapers.slice(0, 5)); // Show top 5 recent
+      const mapped: SavedPaperItem[] = list
+        .map((p) => {
+          const header = ((p.settings_json as any)?.header ?? {}) as Record<string, unknown>;
+          const paperName = String(header.paperName || header.examTitle || "").trim();
+          if (!paperName) return null;
+          return {
+            id: p.id,
+            createdAt: p.created_at,
+            paperName,
+            subjectName: String(header.subjectName || "Unknown Subject"),
+            totalMarks: Number(p.total_marks || 0),
+          };
+        })
+        .filter((p): p is SavedPaperItem => !!p);
+      setPapers(mapped);
     } catch (e) { console.error(e); }
   }, [teacherId]);
 
@@ -138,6 +160,24 @@ function SavedPapersWidget({ teacherId }: { teacherId: string }) {
   }, [loadPapers]);
 
   const navigate = useNavigate();
+  const subjectOptions = Array.from(new Set(papers.map((p) => p.subjectName))).sort((a, b) => a.localeCompare(b));
+  const visible = [...papers]
+    .filter((p) => (subjectFilter === "all" ? true : p.subjectName === subjectFilter))
+    .sort((a, b) => {
+      if (sortBy === "date_desc") return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      if (sortBy === "date_asc") return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      if (sortBy === "name_asc") return a.paperName.localeCompare(b.paperName);
+      return b.paperName.localeCompare(a.paperName);
+    })
+    .slice(0, 10);
+
+  const grouped = visible.reduce<Record<string, SavedPaperItem[]>>((acc, paper) => {
+    const key = groupBy === "subject" ? paper.subjectName : "All";
+    const bucket = acc[key] ?? [];
+    bucket.push(paper);
+    acc[key] = bucket;
+    return acc;
+  }, {});
 
   if (papers.length === 0) {
     return (
@@ -148,19 +188,68 @@ function SavedPapersWidget({ teacherId }: { teacherId: string }) {
   }
 
   return (
-    <div className="flex flex-col gap-1.5">
-      {papers.map((p) => (
-        <button
-          key={p.id}
-          className="flex flex-col items-start gap-1 rounded-lg px-3 py-2 text-sm transition-all text-slate-600 dark:text-slate-400 hover:bg-bg dark:hover:bg-slate-800/80 hover:text-brand text-left w-full group"
-          onClick={() => {
-            navigate(`/paper-generator?load=${p.id}`);
-          }}
+    <div className="space-y-2">
+      <div className="grid grid-cols-2 gap-1 px-1">
+        <select
+          className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] font-semibold text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+          value={sortBy}
+          onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
         >
-          <span className="font-semibold truncate w-full group-hover:text-brand transition-colors text-slate-700 dark:text-slate-300">{(p.settings_json as any).header.paperName}</span>
-          <span className="text-[10px] text-slate-400">{new Date(p.created_at).toLocaleDateString()}</span>
-        </button>
-      ))}
+          <option value="date_desc">Newest</option>
+          <option value="date_asc">Oldest</option>
+          <option value="name_asc">A-Z</option>
+          <option value="name_desc">Z-A</option>
+        </select>
+        <select
+          className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] font-semibold text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+          value={groupBy}
+          onChange={(e) => setGroupBy(e.target.value as typeof groupBy)}
+        >
+          <option value="none">No Group</option>
+          <option value="subject">Group Subject</option>
+        </select>
+      </div>
+      <select
+        className="w-full rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] font-semibold text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+        value={subjectFilter}
+        onChange={(e) => setSubjectFilter(e.target.value)}
+      >
+        <option value="all">All Subjects</option>
+        {subjectOptions.map((subject) => (
+          <option key={subject} value={subject}>
+            {subject}
+          </option>
+        ))}
+      </select>
+
+      <div className="flex max-h-72 flex-col gap-1.5 overflow-auto pr-1">
+        {Object.entries(grouped).map(([group, list]) => (
+          <div key={group} className="space-y-1">
+            {groupBy === "subject" && (
+              <p className="px-2 text-[10px] font-bold uppercase tracking-wider text-slate-400">{group}</p>
+            )}
+            {list.map((p) => (
+              <button
+                key={p.id}
+                className="flex flex-col items-start gap-1 rounded-lg px-3 py-2 text-left text-sm text-slate-600 transition-all hover:bg-bg hover:text-brand dark:text-slate-400 dark:hover:bg-slate-800/80 w-full group"
+                onClick={() => {
+                  navigate(`/paper-generator?load=${p.id}`);
+                }}
+              >
+                <span className="w-full truncate font-semibold text-slate-700 transition-colors group-hover:text-brand dark:text-slate-300">
+                  {p.paperName}
+                </span>
+                <div className="flex w-full items-center justify-between">
+                  <span className="text-[10px] text-slate-400">{new Date(p.createdAt).toLocaleDateString()}</span>
+                  <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-700">
+                    {p.totalMarks}m
+                  </span>
+                </div>
+              </button>
+            ))}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

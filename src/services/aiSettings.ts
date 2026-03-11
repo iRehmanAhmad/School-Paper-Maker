@@ -1,6 +1,17 @@
 import { hasSupabase, supabase } from "@/services/supabase";
 
-export type AIProvider = "groq" | "openrouter" | "together" | "openai" | "gemini" | "supabase" | "deepseek" | "anthropic";
+export type AIProvider = "groq" | "openrouter" | "together" | "openai" | "gemini" | "supabase" | "deepseek" | "anthropic" | "qwen" | "siliconflow";
+
+export type AIKeyEntry = {
+  id: string;
+  provider: AIProvider;
+  key: string;
+  label?: string;
+  usageCount: number;
+  lastUsed?: string;
+  isExhausted?: boolean;
+  quotaRemaining?: string;
+};
 
 export type AISettings = {
   provider: AIProvider;
@@ -12,6 +23,9 @@ export type AISettings = {
   geminiApiKey: string;
   deepseekApiKey: string;
   anthropicApiKey: string;
+  qwenApiKey: string;
+  siliconflowApiKey: string;
+  keyPool: AIKeyEntry[];
 };
 
 const KEY = "pg_ai_settings";
@@ -27,6 +41,9 @@ const defaults: AISettings = {
   geminiApiKey: "",
   deepseekApiKey: "",
   anthropicApiKey: "",
+  qwenApiKey: "",
+  siliconflowApiKey: "",
+  keyPool: [],
 };
 
 export function getAISettings(): AISettings {
@@ -34,9 +51,40 @@ export function getAISettings(): AISettings {
     const raw = localStorage.getItem(KEY);
     if (!raw) return defaults;
     const parsed = JSON.parse(raw) as Partial<AISettings>;
-    return { ...defaults, ...parsed };
+    const settings = { ...defaults, ...parsed };
+
+    // Self-migration: Move individual keys to pool if pool is empty
+    if (!settings.keyPool || settings.keyPool.length === 0) {
+      const providers: AIProvider[] = ["groq", "gemini", "deepseek", "qwen", "siliconflow", "openai", "anthropic", "openrouter", "together"];
+      providers.forEach(p => {
+        const key = settings[`${p}ApiKey` as keyof AISettings];
+        if (typeof key === "string" && key) {
+          settings.keyPool.push({
+            id: `initial-${p}`,
+            provider: p,
+            key,
+            label: "Primary Key",
+            usageCount: 0,
+            isExhausted: false,
+          });
+        }
+      });
+      // Save migrated state
+      localStorage.setItem(KEY, JSON.stringify(settings));
+    }
+
+    return settings;
   } catch {
     return defaults;
+  }
+}
+
+export function updateKeyStatus(keyId: string, updates: Partial<AIKeyEntry>) {
+  const settings = getAISettings();
+  const idx = settings.keyPool.findIndex(k => k.id === keyId);
+  if (idx !== -1) {
+    settings.keyPool[idx] = { ...settings.keyPool[idx], ...updates };
+    saveAISettings(settings);
   }
 }
 
@@ -55,6 +103,8 @@ type SchoolAISettingsRow = {
   gemini_api_key: string;
   deepseek_api_key: string;
   anthropic_api_key: string;
+  qwen_api_key: string;
+  siliconflow_api_key: string;
   updated_by?: string | null;
   updated_at?: string;
 };
@@ -84,6 +134,8 @@ function toRow(schoolId: string, input: AISettings, updatedBy?: string | null): 
     gemini_api_key: input.geminiApiKey || "",
     deepseek_api_key: input.deepseekApiKey || "",
     anthropic_api_key: input.anthropicApiKey || "",
+    qwen_api_key: input.qwenApiKey || "",
+    siliconflow_api_key: input.siliconflowApiKey || "",
     updated_by: updatedBy || null,
     updated_at: new Date().toISOString(),
   };
@@ -100,6 +152,9 @@ function fromRow(row: Partial<SchoolAISettingsRow>): AISettings {
     geminiApiKey: row.gemini_api_key || "",
     deepseekApiKey: row.deepseek_api_key || "",
     anthropicApiKey: row.anthropic_api_key || "",
+    qwenApiKey: row.qwen_api_key || "",
+    siliconflowApiKey: row.siliconflow_api_key || "",
+    keyPool: [],
   };
 }
 

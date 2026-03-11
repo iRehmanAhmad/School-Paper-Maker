@@ -1,4 +1,4 @@
-import { getAISettings } from "@/services/aiSettings";
+import { getAISettings, updateKeyStatus, type AIProvider, type AISettings, type AIKeyEntry } from "@/services/aiSettings";
 import { hasSupabase, supabase } from "@/services/supabase";
 import type { BloomLevel, Difficulty, QuestionLevel, QuestionType } from "@/types/domain";
 
@@ -82,7 +82,7 @@ Rules:
 - diagram => include diagram_url if possible`;
 }
 
-async function callOpenAICompatible(baseUrl: string, apiKey: string, model: string, prompt: string, extraHeaders?: Record<string, string>) {
+async function callOpenAICompatible(baseUrl: string, apiKey: string, model: string, prompt: string, extraHeaders?: Record<string, string>, keyId?: string) {
   const response = await fetch(baseUrl, {
     method: "POST",
     headers: {
@@ -96,6 +96,25 @@ async function callOpenAICompatible(baseUrl: string, apiKey: string, model: stri
       temperature: 0.3,
     }),
   });
+
+  if (keyId) {
+    const remainingReq = response.headers.get("x-ratelimit-remaining-requests");
+    const remainingTok = response.headers.get("x-ratelimit-remaining-tokens");
+    const quota = remainingReq ? `${remainingReq} req remaining` : remainingTok ? `${remainingTok} tokens remaining` : undefined;
+
+    if (response.ok) {
+      const settings = getAISettings();
+      const currentEntry = settings.keyPool.find(k => k.id === keyId);
+      updateKeyStatus(keyId, {
+        usageCount: (currentEntry?.usageCount || 0) + 1,
+        lastUsed: new Date().toISOString(),
+        quotaRemaining: quota,
+        isExhausted: false
+      });
+    } else if (response.status === 429) {
+      updateKeyStatus(keyId, { isExhausted: true, quotaRemaining: "Rate Limited" });
+    }
+  }
 
   if (!response.ok) {
     throw new Error(`AI provider error: ${await response.text()}`);
@@ -112,7 +131,7 @@ async function callOpenAICompatible(baseUrl: string, apiKey: string, model: stri
   return parsed.questions || [];
 }
 
-async function callGemini(apiKey: string, model: string, prompt: string) {
+async function callGemini(apiKey: string, model: string, prompt: string, keyId?: string) {
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
     method: "POST",
     headers: {
@@ -123,6 +142,20 @@ async function callGemini(apiKey: string, model: string, prompt: string) {
       generationConfig: { temperature: 0.3 },
     }),
   });
+
+  if (keyId) {
+    if (response.ok) {
+      const settings = getAISettings();
+      const currentEntry = settings.keyPool.find(k => k.id === keyId);
+      updateKeyStatus(keyId, {
+        usageCount: (currentEntry?.usageCount || 0) + 1,
+        lastUsed: new Date().toISOString(),
+        isExhausted: false
+      });
+    } else if (response.status === 429) {
+      updateKeyStatus(keyId, { isExhausted: true, quotaRemaining: "Quota Exceeded" });
+    }
+  }
 
   if (!response.ok) {
     throw new Error(`Gemini error: ${await response.text()}`);
@@ -176,44 +209,51 @@ function mockQuestions(input: AIInput): AIGeneratedQuestion[] {
   return items;
 }
 
-async function tryClientSideProviders(input: AIInput): Promise<AIGeneratedQuestion[] | null> {
-  const settings = getAISettings();
-  const prompt = buildPrompt(input);
+async function callProvider(provider: AIProvider, settings: AISettings, prompt: string, keyEntry: AIKeyEntry): Promise<AIGeneratedQuestion[]> {
+  const model = settings.model || "";
+  const apiKey = keyEntry.key;
+  const keyId = keyEntry.id;
 
-  if (settings.provider === "groq" && settings.groqApiKey) {
-    return callOpenAICompatible("https://api.groq.com/openai/v1/chat/completions", settings.groqApiKey, settings.model || "llama-3.3-70b-versatile", prompt);
+  if (provider === "groq") {
+    return callOpenAICompatible("https://api.groq.com/openai/v1/chat/completions", apiKey, model || "llama-3.3-70b-versatile", prompt, undefined, keyId);
   }
 
-  if (settings.provider === "openrouter" && settings.openrouterApiKey) {
+  if (provider === "openrouter") {
     return callOpenAICompatible(
       "https://openrouter.ai/api/v1/chat/completions",
-      settings.openrouterApiKey,
-      settings.model || "meta-llama/llama-3.3-70b-instruct:free",
+      apiKey,
+      model || "meta-llama/llama-3.3-70b-instruct:free",
       prompt,
-      {
-        "HTTP-Referer": window.location.origin,
-        "X-Title": "Paper Generator",
-      },
+      { "HTTP-Referer": window.location.origin, "X-Title": "Paper Generator" },
+      keyId
     );
   }
 
-  if (settings.provider === "together" && settings.togetherApiKey) {
-    return callOpenAICompatible("https://api.together.xyz/v1/chat/completions", settings.togetherApiKey, settings.model || "meta-llama/Llama-3.3-70B-Instruct-Turbo", prompt);
+  if (provider === "together") {
+    return callOpenAICompatible("https://api.together.xyz/v1/chat/completions", apiKey, model || "meta-llama/Llama-3.3-70B-Instruct-Turbo", prompt, undefined, keyId);
   }
 
-  if (settings.provider === "openai" && settings.openaiApiKey) {
-    return callOpenAICompatible("https://api.openai.com/v1/chat/completions", settings.openaiApiKey, settings.model || "gpt-4o-mini", prompt);
+  if (provider === "openai") {
+    return callOpenAICompatible("https://api.openai.com/v1/chat/completions", apiKey, model || "gpt-4o-mini", prompt, undefined, keyId);
   }
 
-  if (settings.provider === "gemini" && settings.geminiApiKey) {
-    return callGemini(settings.geminiApiKey, settings.model || "gemini-1.5-flash", prompt);
+  if (provider === "gemini") {
+    return callGemini(apiKey, model || "gemini-1.5-flash", prompt, keyId);
   }
 
-  if (settings.provider === "deepseek" && settings.deepseekApiKey) {
-    return callOpenAICompatible("https://api.deepseek.com/v1/chat/completions", settings.deepseekApiKey, settings.model || "deepseek-chat", prompt);
+  if (provider === "deepseek") {
+    return callOpenAICompatible("https://api.deepseek.com/v1/chat/completions", apiKey, model || "deepseek-chat", prompt, undefined, keyId);
   }
 
-  if (settings.provider === "anthropic" && settings.anthropicApiKey) {
+  if (provider === "qwen") {
+    return callOpenAICompatible("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", apiKey, model || "qwen-plus", prompt, undefined, keyId);
+  }
+
+  if (provider === "siliconflow") {
+    return callOpenAICompatible("https://api.siliconflow.cn/v1/chat/completions", apiKey, model || "deepseek-ai/DeepSeek-V3", prompt, undefined, keyId);
+  }
+
+  if (provider === "anthropic" && settings.anthropicApiKey) {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -223,7 +263,7 @@ async function tryClientSideProviders(input: AIInput): Promise<AIGeneratedQuesti
         "dangerously-allow-browser": "true"
       },
       body: JSON.stringify({
-        model: settings.model || "claude-3-5-sonnet-20240620",
+        model: model || "claude-3-5-sonnet-20240620",
         max_tokens: 4096,
         messages: [{ role: "user", content: prompt }]
       })
@@ -234,6 +274,42 @@ async function tryClientSideProviders(input: AIInput): Promise<AIGeneratedQuesti
     const cleaned = String(content).replace(/```json|```/g, "").trim();
     const parsed = JSON.parse(cleaned) as { questions?: AIGeneratedQuestion[] };
     return parsed.questions || [];
+  }
+
+  throw new Error(`Provider ${provider} not configured or recognized`);
+}
+
+async function tryClientSideProviders(input: AIInput): Promise<AIGeneratedQuestion[] | null> {
+  const settings = getAISettings();
+  const prompt = buildPrompt(input);
+
+  const providers: AIProvider[] = [
+    "groq", "gemini", "deepseek", "qwen", "siliconflow", "openrouter", "together", "openai", "anthropic"
+  ];
+  const providerPriority = providers;
+
+  const keyChain = [...settings.keyPool]
+    .filter(k => !k.isExhausted)
+    .sort((a, b) => {
+      if (a.provider === settings.provider && b.provider !== settings.provider) return -1;
+      if (a.provider !== settings.provider && b.provider === settings.provider) return 1;
+      const aIdx = providerPriority.indexOf(a.provider);
+      const bIdx = providerPriority.indexOf(b.provider);
+      return aIdx - bIdx;
+    });
+
+  if (!keyChain.length) return null;
+
+  for (const keyEntry of keyChain) {
+    try {
+      if (keyEntry.provider !== settings.provider) {
+        console.log(`[AI] Primary ${settings.provider} failed or skipped, falling back to ${keyEntry.provider} (Key: ${keyEntry.label || keyEntry.id})`);
+      }
+      return await callProvider(keyEntry.provider, settings, prompt, keyEntry);
+    } catch (err) {
+      console.warn(`[AI] Key ${keyEntry.label || keyEntry.id} (${keyEntry.provider}) failed:`, err);
+      updateKeyStatus(keyEntry.id, { isExhausted: true });
+    }
   }
 
   return null;
@@ -303,41 +379,78 @@ Return ONLY a strict JSON object with a "chapters" array of strings.
 Example response: {"chapters": ["Introduction to Physics", "Kinematics", "Dynamics"]}
 Do not include chapter numbers in the titles.`;
 
-  try {
-    let content = "";
-    if (settings.provider === "gemini" && settings.geminiApiKey) {
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${settings.model || "gemini-1.5-flash"}:generateContent?key=${settings.geminiApiKey}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }] }),
-      });
-      const data = await response.json();
-      content = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    } else if (settings.openaiApiKey || settings.groqApiKey || settings.togetherApiKey || settings.openrouterApiKey) {
-      // Using groq as fallback default for this UI booster
-      const url = settings.groqApiKey ? "https://api.groq.com/openai/v1/chat/completions" : "https://api.openai.com/v1/chat/completions";
-      const key = settings.groqApiKey || settings.openaiApiKey || settings.togetherApiKey || settings.openrouterApiKey;
-      const model = settings.model || (settings.groqApiKey ? "llama-3.3-70b-versatile" : "gpt-4o-mini");
+  const providerPriority: AIProvider[] = [
+    "groq", "gemini", "deepseek", "qwen", "siliconflow", "openrouter", "together", "openai", "anthropic"
+  ];
 
-      const resp = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-        body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }] }),
-      });
-      const data = await resp.json();
-      content = data?.choices?.[0]?.message?.content || "";
-    }
+  const keyChain = [...settings.keyPool]
+    .filter(k => !k.isExhausted)
+    .sort((a, b) => {
+      if (a.provider === settings.provider && b.provider !== settings.provider) return -1;
+      if (a.provider !== settings.provider && b.provider === settings.provider) return 1;
+      const aIdx = providerPriority.indexOf(a.provider);
+      const bIdx = providerPriority.indexOf(b.provider);
+      return aIdx - bIdx;
+    });
 
-    if (content) {
-      const cleaned = content.replace(/```json|```/g, "").trim();
-      const parsed = JSON.parse(cleaned);
-      if (Array.isArray(parsed.chapters)) return parsed.chapters;
+  for (const keyEntry of keyChain) {
+    const provider = keyEntry.provider;
+    const apiKey = keyEntry.key;
+    const keyId = keyEntry.id;
+    try {
+      let content = "";
+      if (provider === "gemini") {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${settings.model || "gemini-1.5-flash"}:generateContent?key=${apiKey}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }] }),
+        });
+        if (response.ok) {
+          const data = await response.json();
+          content = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+          updateKeyStatus(keyId, { usageCount: (keyEntry.usageCount || 0) + 1, lastUsed: new Date().toISOString() });
+        } else if (response.status === 429) {
+          updateKeyStatus(keyId, { isExhausted: true, quotaRemaining: "Quota Exceeded" });
+        }
+      } else {
+        const urlMap: Record<string, string> = {
+          groq: "https://api.groq.com/openai/v1/chat/completions",
+          openai: "https://api.openai.com/v1/chat/completions",
+          openrouter: "https://openrouter.ai/api/v1/chat/completions",
+          deepseek: "https://api.deepseek.com/v1/chat/completions",
+          qwen: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+          siliconflow: "https://api.siliconflow.cn/v1/chat/completions",
+          together: "https://api.together.xyz/v1/chat/completions",
+        };
+        const url = urlMap[provider];
+        const model = settings.model || (provider === "groq" ? "llama-3.3-70b-versatile" : provider === "openai" ? "gpt-4o-mini" : "");
+
+        if (url && apiKey) {
+          const resp = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+            body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }] }),
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            content = data?.choices?.[0]?.message?.content || "";
+            updateKeyStatus(keyId, { usageCount: (keyEntry.usageCount || 0) + 1, lastUsed: new Date().toISOString() });
+          } else if (resp.status === 429) {
+            updateKeyStatus(keyId, { isExhausted: true, quotaRemaining: "Rate Limited" });
+          }
+        }
+      }
+
+      if (content) {
+        const cleaned = content.replace(/```json|```/g, "").trim();
+        const parsed = JSON.parse(cleaned);
+        if (Array.isArray(parsed.chapters)) return parsed.chapters;
+      }
+    } catch (err) {
+      console.warn(`[AI Syllabus] Provider ${provider} (Key ${keyId}) failed:`, err);
     }
-  } catch (err) {
-    console.error("AI Syllabus Error:", err);
   }
 
-  // Final fallback
   return ["Chapter 1: Introduction", "Chapter 2: Fundamental Concepts", "Chapter 3: Advanced Topics"];
 }
 
@@ -371,42 +484,81 @@ Return JSON in this format:
     ...history.map((m, i) => (i === history.length - 1 ? { ...m, content: promptPrefix + m.content } : m))
   ];
 
-  try {
-    let content = "";
-    if (settings.provider === "gemini" && settings.geminiApiKey) {
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${settings.model || "gemini-1.5-flash"}:generateContent?key=${settings.geminiApiKey}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ contents: messages.map(m => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })) }),
-      });
-      const data = await response.json();
-      content = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    } else {
-      // Fallback for OpenAI compatible
-      const url = settings.groqApiKey ? "https://api.groq.com/openai/v1/chat/completions" :
-        settings.openaiApiKey ? "https://api.openai.com/v1/chat/completions" :
-          settings.openrouterApiKey ? "https://openrouter.ai/api/v1/chat/completions" : "https://api.groq.com/openai/v1/chat/completions";
-      const key = settings.groqApiKey || settings.openaiApiKey || settings.openrouterApiKey;
-      const model = settings.model || (settings.groqApiKey ? "llama-3.3-70b-versatile" : "gpt-4o-mini");
+  const providerPriority: AIProvider[] = [
+    "groq", "gemini", "deepseek", "qwen", "siliconflow", "openrouter", "together", "openai", "anthropic"
+  ];
 
-      if (key) {
-        const resp = await fetch(url, {
+  const keyChain = [...settings.keyPool]
+    .filter(k => !k.isExhausted)
+    .sort((a, b) => {
+      if (a.provider === settings.provider && b.provider !== settings.provider) return -1;
+      if (a.provider !== settings.provider && b.provider === settings.provider) return 1;
+      const aIdx = providerPriority.indexOf(a.provider);
+      const bIdx = providerPriority.indexOf(b.provider);
+      return aIdx - bIdx;
+    });
+
+  for (const keyEntry of keyChain) {
+    const provider = keyEntry.provider;
+    const apiKey = keyEntry.key;
+    const keyId = keyEntry.id;
+    try {
+      let content = "";
+      if (provider === "gemini") {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${settings.model || "gemini-1.5-flash"}:generateContent?key=${apiKey}`, {
           method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-          body: JSON.stringify({ model, messages, temperature: 0.7, response_format: { type: "json_object" } }),
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contents: messages.map(m => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })) }),
         });
-        const data = await resp.json();
-        content = data?.choices?.[0]?.message?.content || "";
-      }
-    }
+        if (response.ok) {
+          const data = await response.json();
+          content = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+          updateKeyStatus(keyId, { usageCount: (keyEntry.usageCount || 0) + 1, lastUsed: new Date().toISOString() });
+        } else if (response.status === 429) {
+          updateKeyStatus(keyId, { isExhausted: true, quotaRemaining: "Quota Exceeded" });
+        }
+      } else {
+        const urlMap: Record<string, string> = {
+          groq: "https://api.groq.com/openai/v1/chat/completions",
+          openai: "https://api.openai.com/v1/chat/completions",
+          openrouter: "https://openrouter.ai/api/v1/chat/completions",
+          deepseek: "https://api.deepseek.com/v1/chat/completions",
+          qwen: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+          siliconflow: "https://api.siliconflow.cn/v1/chat/completions",
+          together: "https://api.together.xyz/v1/chat/completions",
+        };
+        const url = urlMap[provider];
+        const model = settings.model || (provider === "groq" ? "llama-3.3-70b-versatile" : provider === "openai" ? "gpt-4o-mini" : "");
 
-    if (content) {
-      const cleaned = content.replace(/```json|```/g, "").trim();
-      return JSON.parse(cleaned) as DiscussionResponse;
+        if (url && apiKey) {
+          const resp = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+            body: JSON.stringify({
+              model,
+              messages,
+              temperature: 0.7,
+              response_format: { type: "json_object" }
+            }),
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            content = data?.choices?.[0]?.message?.content || "";
+            updateKeyStatus(keyId, { usageCount: (keyEntry.usageCount || 0) + 1, lastUsed: new Date().toISOString() });
+          } else if (resp.status === 429) {
+            updateKeyStatus(keyId, { isExhausted: true, quotaRemaining: "Rate Limited" });
+          }
+        }
+      }
+
+      if (content) {
+        const cleaned = content.replace(/```json|```/g, "").trim();
+        return JSON.parse(cleaned) as DiscussionResponse;
+      }
+    } catch (err) {
+      console.warn(`[AI Chat] Provider ${provider} (Key ${keyId}) failed:`, err);
     }
-  } catch (err) {
-    console.error("AI Discussion Error:", err);
   }
 
-  return { message: "I'm sorry, I'm having trouble connecting to my brain right now. Please try again." };
+  return { message: "All configured AI providers failed. Please check your API keys and try again." };
 }

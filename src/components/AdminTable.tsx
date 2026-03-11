@@ -1,4 +1,5 @@
 import { ReactNode } from "react";
+import { LoadingTable } from "./LoadingState";
 
 type Column<T> = {
     header: string;
@@ -14,6 +15,7 @@ type AdminTableProps<T> = {
     onClone?: (item: T) => void;
     onDelete?: (item: T) => void;
     emptyMessage?: string;
+    loading?: boolean;
 };
 
 export function AdminTable<T>({
@@ -24,6 +26,7 @@ export function AdminTable<T>({
     onClone,
     onDelete,
     emptyMessage = "No items found",
+    loading = false,
 }: AdminTableProps<T>) {
     return (
         <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
@@ -40,7 +43,16 @@ export function AdminTable<T>({
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                        {data.length === 0 ? (
+                        {loading ? (
+                            <tr>
+                                <td
+                                    colSpan={columns.length + (onEdit || onClone || onDelete ? 1 : 0)}
+                                    className="px-4 py-4"
+                                >
+                                    <LoadingTable rows={5} columns={columns.length + (onEdit || onClone || onDelete ? 1 : 0)} />
+                                </td>
+                            </tr>
+                        ) : data.length === 0 ? (
                             <tr>
                                 <td
                                     colSpan={columns.length + (onEdit || onClone || onDelete ? 1 : 0)}

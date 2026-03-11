@@ -5,6 +5,7 @@ import { ArcElement, CategoryScale, Chart as ChartJS, Filler, Legend, LinearScal
 import { ArrowDownRight, ArrowUpRight, BookCheck, BookOpen, FileText, FolderPlus, Layers3, Sparkles, WandSparkles } from "lucide-react";
 import { getChapters, getClasses, getPapersByTeacher, getQuestions, getStats, getSubjects } from "@/services/repositories";
 import { useAppStore } from "@/store/useAppStore";
+import { LoadingDashboard } from "@/components/LoadingState";
 import type { ChapterEntity, ClassEntity, Paper, Question, SubjectEntity } from "@/types/domain";
 
 ChartJS.register(ArcElement, CategoryScale, LinearScale, BarElement, Tooltip, Legend, LineElement, PointElement, Filler);
@@ -37,6 +38,7 @@ function countInWindow<T>(rows: T[], accessor: (row: T) => string, start: number
 export function DashboardPage() {
   const profile = useAppStore((s) => s.profile);
   const navigate = useNavigate();
+  const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState<DashboardStats>({ totalQuestions: 0, papersGenerated: 0, totalSubjects: 0, totalChapters: 0, totalClasses: 0 });
   const [questions, setQuestions] = useState<Question[]>([]);
   const [papers, setPapers] = useState<Paper[]>([]);
@@ -51,30 +53,35 @@ export function DashboardPage() {
         return;
       }
 
-      const [s, qs, teacherPapers, schoolClasses] = await Promise.all([
-        getStats(profile.school_id, profile.id),
-        getQuestions(profile.school_id),
-        getPapersByTeacher(profile.id),
-        getClasses(profile.school_id),
-      ]);
+      setLoading(true);
+      try {
+        const [s, qs, teacherPapers, schoolClasses] = await Promise.all([
+          getStats(profile.school_id, profile.id),
+          getQuestions(profile.school_id),
+          getPapersByTeacher(profile.id),
+          getClasses(profile.school_id),
+        ]);
 
-      const classIds = schoolClasses.map((c) => c.id);
-      const schoolSubjects = classIds.length ? await getSubjects(classIds) : [];
-      const subjectIds = schoolSubjects.map((sRow) => sRow.id);
-      const schoolChapters = subjectIds.length ? await getChapters(subjectIds) : [];
+        const classIds = schoolClasses.map((c) => c.id);
+        const schoolSubjects = classIds.length ? await getSubjects(classIds) : [];
+        const subjectIds = schoolSubjects.map((sRow) => sRow.id);
+        const schoolChapters = subjectIds.length ? await getChapters(subjectIds) : [];
 
-      setStats(s);
-      setQuestions(qs);
-      setPapers(teacherPapers);
-      setClasses(schoolClasses);
-      setSubjects(schoolSubjects);
-      setChapters(schoolChapters);
+        setStats(s);
+        setQuestions(qs);
+        setPapers(teacherPapers);
+        setClasses(schoolClasses);
+        setSubjects(schoolSubjects);
+        setChapters(schoolChapters);
 
-      const counts: Record<string, number> = {};
-      qs.forEach((q) => {
-        counts[q.question_type] = (counts[q.question_type] ?? 0) + 1;
-      });
-      setTypeCounts(counts);
+        const counts: Record<string, number> = {};
+        qs.forEach((q) => {
+          counts[q.question_type] = (counts[q.question_type] ?? 0) + 1;
+        });
+        setTypeCounts(counts);
+      } finally {
+        setLoading(false);
+      }
     }
     load();
   }, [profile?.id, profile?.school_id]);
@@ -157,6 +164,10 @@ export function DashboardPage() {
   ];
 
   const isAdmin = profile?.role === "admin";
+
+  if (loading) {
+    return <LoadingDashboard />;
+  }
 
   return (
     <div className="space-y-6">

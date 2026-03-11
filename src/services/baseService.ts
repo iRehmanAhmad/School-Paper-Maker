@@ -423,11 +423,17 @@ function ensureScienceChapter2DummyQuestions() {
   }
 }
 
-function defaultPasswordForUser(user: Pick<UserProfile, "email" | "role">) {
+const PASSWORD_HASHES = {
+  admin123: "240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9",
+  teacher123: "cde383eee8ee7a4400adf7a15f716f179a2eb97646b37e089eb8d6d04e663416",
+  client123: "186474c1f2c2f735a54c2cf82ee8e87f2a5cd30940e280029363fecedfc5328c",
+} as const;
+
+function defaultPasswordHashForUser(user: Pick<UserProfile, "email" | "role">) {
   const email = user.email.toLowerCase();
-  if (user.role === "admin" || email.includes("admin")) return "admin123";
-  if (email.includes("teacher")) return "teacher123";
-  return "client123";
+  if (user.role === "admin" || email.includes("admin")) return PASSWORD_HASHES.admin123;
+  if (email.includes("teacher")) return PASSWORD_HASHES.teacher123;
+  return PASSWORD_HASHES.client123;
 }
 
 function ensureUserPasswords() {
@@ -435,11 +441,18 @@ function ensureUserPasswords() {
   if (!users.length) return;
   let changed = false;
   const next = users.map((user) => {
-    if (user.password && user.password.trim().length >= 6) {
+    if (user.password_hash && user.password_hash.trim().length > 0 && !user.password) {
       return user;
     }
+    const nextUser: UserProfile = {
+      ...user,
+      password_hash: user.password_hash || defaultPasswordHashForUser(user),
+    };
+    if (nextUser.password) {
+      delete (nextUser as any).password;
+    }
     changed = true;
-    return { ...user, password: defaultPasswordForUser(user) };
+    return nextUser;
   });
   if (changed) {
     writeLocal(DB.users, next);
@@ -537,8 +550,24 @@ export function ensureSeed() {
     { id: kpkBody, school_id: schoolId, name: "KPK Govt", created_at: now },
   ]);
   writeLocal<UserProfile>(DB.users, [
-    { id: crypto.randomUUID(), email: "admin@demo.school", role: "admin", school_id: schoolId, full_name: "Demo Admin", password: "admin123", created_at: now },
-    { id: crypto.randomUUID(), email: "teacher@demo.school", role: "teacher", school_id: schoolId, full_name: "Demo Teacher", password: "teacher123", created_at: now },
+    {
+      id: crypto.randomUUID(),
+      email: "admin@demo.school",
+      role: "admin",
+      school_id: schoolId,
+      full_name: "Demo Admin",
+      password_hash: PASSWORD_HASHES.admin123,
+      created_at: now,
+    },
+    {
+      id: crypto.randomUUID(),
+      email: "teacher@demo.school",
+      role: "teacher",
+      school_id: schoolId,
+      full_name: "Demo Teacher",
+      password_hash: PASSWORD_HASHES.teacher123,
+      created_at: now,
+    },
   ]);
   const users = readLocal<UserProfile>(DB.users);
   const adminUserId = users.find((user) => user.role === "admin")?.id || null;

@@ -4,6 +4,7 @@ import { addClass, deleteClass, getClassDeleteImpact, getClasses, getExamBodies,
 import { ConfirmModal } from "@/components/ConfirmModal";
 import { ContextBreadcrumbs } from "@/components/ContextBreadcrumbs";
 import { EmptyState } from "@/components/EmptyState";
+import { SkeletonList } from "@/components/ui/skeleton";
 import { useHierarchyScopeParams } from "@/hooks/useHierarchyScopeParams";
 import { useUndoDeleteQueue } from "@/hooks/useUndoDeleteQueue";
 import { useAppStore } from "@/store/useAppStore";
@@ -38,6 +39,7 @@ export function ClassesPage() {
   const toast = useAppStore((s) => s.pushToast);
   const { scope, mergeScope, clearFrom, scopeToLevel } = useHierarchyScopeParams();
   const { queueDelete } = useUndoDeleteQueue();
+  const [loading, setLoading] = useState(true);
   const [rows, setRows] = useState<ClassEntity[]>([]);
   const [examBodies, setExamBodies] = useState<ExamBody[]>([]);
   const [examBodyId, setExamBodyId] = useState("");
@@ -56,14 +58,19 @@ export function ClassesPage() {
     if (!profile?.school_id) {
       return;
     }
-    const bodies = await getExamBodies(profile.school_id);
-    setExamBodies(bodies);
-    const selectedBody = examBodyId && bodies.some((b) => b.id === examBodyId) ? examBodyId : "";
-    if (examBodyId && !selectedBody) {
-      setExamBodyId("");
-      clearFrom("examBodyId");
+    setLoading(true);
+    try {
+      const bodies = await getExamBodies(profile.school_id);
+      setExamBodies(bodies);
+      const selectedBody = examBodyId && bodies.some((b) => b.id === examBodyId) ? examBodyId : "";
+      if (examBodyId && !selectedBody) {
+        setExamBodyId("");
+        clearFrom("examBodyId");
+      }
+      setRows(await getClasses(profile.school_id, selectedBody || undefined));
+    } finally {
+      setLoading(false);
     }
-    setRows(await getClasses(profile.school_id, selectedBody || undefined));
   }
 
   useEffect(() => {
@@ -242,7 +249,11 @@ export function ClassesPage() {
         <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Type to filter classes" />
       </label>
       <div className="rounded-xl border border-slate-200 bg-white">
-        {filteredRows.length === 0 ? (
+        {loading ? (
+          <div className="p-4">
+            <SkeletonList items={5} />
+          </div>
+        ) : filteredRows.length === 0 ? (
           <EmptyState title="No classes found" description="Add a class for the selected exam body to continue." />
         ) : (
           filteredRows.map((row) => (

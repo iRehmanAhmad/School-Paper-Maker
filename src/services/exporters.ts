@@ -388,3 +388,69 @@ export function openPrintableHtml(set: GeneratedSet, settings: GeneratorSettings
     w.document.close();
   }
 }
+
+export function openPrintableHtmlAllSets(sets: GeneratedSet[], settings: GeneratorSettings, showAnswers = false) {
+  if (!sets.length) return;
+
+  const pages = sets.map((set) => {
+    const rows = set.questions
+      .map((q, idx) => {
+        const options = q.options.length
+          ? `<div class="opts">${q.options.map((opt, oi) => `<div>${String.fromCharCode(65 + oi)}. ${opt}</div>`).join("")}</div>`
+          : "";
+        const answer = showAnswers ? `<div class="ans">Answer: ${q.correctAnswer || "-"}</div>` : "";
+        const lines = Array.from({ length: q.emptyLines || 0 }).map(() => `<div class="line"></div>`).join("");
+        return `<div class="q"><div class="qtext"><b>${idx + 1}.</b> ${q.questionText} <span class="marks">(${q.marks})</span></div>${options}${answer}${lines}</div>`;
+      })
+      .join("");
+    return `
+      <section class="sheet">
+        <header>
+          <h1>${settings.header.schoolName}</h1>
+          <p>${settings.header.examTitle} - Class ${settings.header.className} - ${settings.header.subjectName}</p>
+          <p class="meta">Set ${set.label} | Time: ${settings.header.timeLabel} | Marks: ${set.totalMarks}</p>
+        </header>
+        <main>${rows}</main>
+      </section>
+    `;
+  });
+
+  const html = `
+<!doctype html>
+<html>
+<head>
+  <title>${settings.header.schoolName} - All Sets</title>
+  <style>
+    @page { size: ${settings.header.paperSize === "Letter" ? "8.5in 11in" : settings.header.paperSize === "Legal" ? "8.5in 14in" : "A4"}; margin: 14mm; }
+    body { margin: 0; font-family: Arial, sans-serif; color: #0f172a; }
+    .sheet { page-break-after: always; break-after: page; }
+    .sheet:last-child { page-break-after: auto; break-after: auto; }
+    header { border-bottom: 2px solid #0f172a; margin-bottom: 12px; padding-bottom: 8px; }
+    h1 { margin: 0; font-size: 24px; text-transform: uppercase; }
+    header p { margin: 3px 0; font-size: 12px; font-weight: 700; }
+    .meta { color: #334155; }
+    .q { margin: 0 0 12px; page-break-inside: avoid; break-inside: avoid; }
+    .qtext { font-size: ${settings.header.contentFontSize || 11}px; line-height: 1.45; }
+    .marks { color: #475569; font-weight: 700; }
+    .opts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 16px; margin-top: 4px; font-size: 12px; }
+    .ans { margin-top: 4px; color: #166534; font-size: 12px; font-weight: 700; }
+    .line { border-bottom: 1px solid #cbd5e1; height: 24px; margin-top: 3px; }
+  </style>
+</head>
+<body>
+  ${pages.join("")}
+  <script>
+    window.onload = () => {
+      window.print();
+      setTimeout(() => window.close(), 500);
+    };
+  </script>
+</body>
+</html>
+  `;
+
+  const popup = window.open("", "_blank");
+  if (!popup) return;
+  popup.document.write(html);
+  popup.document.close();
+}

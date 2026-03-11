@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getAppSettings } from "@/services/appSettings";
-import { downloadAnswerPdf, downloadQuestionDocx, downloadQuestionPdf, downloadRubricPdf, openPrintableHtml } from "@/services/exporters";
+import { downloadAnswerPdf, downloadQuestionDocx, downloadQuestionPdf, downloadRubricPdf, openPrintableHtml, openPrintableHtmlAllSets } from "@/services/exporters";
 import { generatePaperBundle } from "@/services/paperEngine";
 import {
   getBlueprintById,
@@ -124,6 +124,8 @@ export function PaperGeneratorPage() {
   const [bloomDistribution] = useState<Record<BloomLevel, number>>({ remember: 40, understand: 30, apply: 20, analyze: 10, evaluate: 0 });
   const [availableCounts, setAvailableCounts] = useState<Record<QuestionType, number>>({ mcq: 0, true_false: 0, fill_blanks: 0, short: 0, long: 0, matching: 0, diagram: 0 });
   const [chapterCounts, setChapterCounts] = useState<Record<string, number>>({});
+  const [compositionOutdated, setCompositionOutdated] = useState(false);
+  const [compositionSyncKey, setCompositionSyncKey] = useState("");
 
   // Composition Presets
   const [compositionPresets, setCompositionPresets] = useState<Record<string, CompositionRow[]>>(() => {
@@ -434,6 +436,39 @@ export function PaperGeneratorPage() {
     setSelectedTopicIds((prev) => prev.filter((id) => visible.has(id)));
   }, [filteredTopics, selectedTopicIds.length, chapterIds.length, topics.length]);
 
+  const compositionContextKey = useMemo(() => {
+    const sortedChapters = [...chapterIds].sort();
+    const sortedTopics = [...selectedTopicIds].sort();
+    const sortedLevels = [...selectedLevels].sort();
+    const availableSignature = compositionTypes.map((type) => `${type}:${availableCounts[type] || 0}`).join("|");
+    return [
+      subjectId || "",
+      sortedChapters.join(","),
+      sortedTopics.join(","),
+      sortedLevels.join(","),
+      availableSignature,
+    ].join("::");
+  }, [subjectId, chapterIds, selectedTopicIds, selectedLevels, availableCounts]);
+
+  function recalculateCompositionForCurrentScope() {
+    setComposition((prev) =>
+      prev.map((row) => {
+        const available = availableCounts[row.type] || 0;
+        const boundedCount = Math.min(Math.max(0, row.count), available);
+        const boundedChoice = Math.min(Math.max(0, row.choice), boundedCount);
+        return {
+          ...row,
+          selected: row.selected && available > 0,
+          count: boundedCount,
+          choice: boundedChoice,
+        };
+      }),
+    );
+    setCompositionOutdated(false);
+    setCompositionSyncKey(compositionContextKey);
+    toast("success", "Composition recalculated for updated syllabus.");
+  }
+
   // Fetch individual chapter counts for display in the syllabus step
   useEffect(() => {
     async function fetchChapterCounts() {
@@ -471,9 +506,24 @@ export function PaperGeneratorPage() {
     updateCounts();
   }, [profile?.school_id, chapterIds, selectedLevels, selectedTopicIds]);
 
+  useEffect(() => {
+    if (step < 3) return;
+    if (!compositionSyncKey) {
+      setCompositionSyncKey(compositionContextKey);
+      return;
+    }
+    if (compositionSyncKey !== compositionContextKey) {
+      setCompositionOutdated(true);
+    }
+  }, [step, compositionSyncKey, compositionContextKey]);
+
   async function generate() {
     if (!profile?.school_id || !profile.id || !subjectId || !chapterIds.length) {
       toast("error", "Please complete step 1 and 2 before generating.");
+      return false;
+    }
+    if (compositionOutdated) {
+      toast("error", "Syllabus changed. Recalculate composition before generating.");
       return false;
     }
 
@@ -959,6 +1009,21 @@ export function PaperGeneratorPage() {
                   </button>
                 </div>
               </h3>
+
+              {compositionOutdated && (
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
+                  <p className="text-xs font-bold uppercase tracking-wide text-amber-700">
+                    Syllabus changed. Recalculate composition to match latest chapter/topic availability.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={recalculateCompositionForCurrentScope}
+                    className="rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-bold uppercase tracking-wider text-white hover:bg-amber-700"
+                  >
+                    Recalculate Composition
+                  </button>
+                </div>
+              )}
 
               <div className="overflow-x-auto -mx-8">
                 <table className="w-full text-left border-collapse min-w-[1000px]">

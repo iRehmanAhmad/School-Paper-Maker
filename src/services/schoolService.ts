@@ -15,22 +15,61 @@ function normalizePassword(value: string) {
     return value.trim();
 }
 
+async function sha256Hex(value: string) {
+    const bytes = new TextEncoder().encode(value);
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(digest))
+        .map((n) => n.toString(16).padStart(2, "0"))
+        .join("");
+}
+
+async function passwordHash(_email: string, password: string) {
+    return sha256Hex(password);
+}
+
+async function migratePlainPasswordIfNeeded(user: UserProfile, plainPassword: string) {
+    const rows = readLocal<UserProfile>(DB.users);
+    const index = rows.findIndex((row) => row.id === user.id);
+    if (index < 0) {
+        return user;
+    }
+    const hashed = await passwordHash(user.email, plainPassword);
+    const nextRow: UserProfile = {
+        ...rows[index],
+        password_hash: hashed,
+    };
+    delete (nextRow as any).password;
+    rows[index] = nextRow;
+    writeLocal(DB.users, rows);
+    return nextRow;
+}
+
 export async function loginWithPassword(email: string, password: string): Promise<UserProfile> {
     const normalizedEmail = email.trim().toLowerCase();
     const normalizedPassword = normalizePassword(password);
+    if (!normalizedPassword) {
+        throw new Error("Password is required");
+    }
     ensureSeed();
     const localUsers = readLocal<UserProfile>(DB.users);
     const localMatch = localUsers.find((u) => u.email.toLowerCase() === normalizedEmail);
 
     // Local first for demo/offline mode.
     if (localMatch) {
+        if (localMatch.password_hash) {
+            const incomingHash = await passwordHash(normalizedEmail, normalizedPassword);
+            if (localMatch.password_hash !== incomingHash) {
+                throw new Error("Invalid email or password");
+            }
+            return localMatch;
+        }
         if (!localMatch.password) {
             throw new Error("Password not set for this account. Ask admin to reset it.");
         }
         if (localMatch.password !== normalizedPassword) {
             throw new Error("Invalid email or password");
         }
-        return localMatch;
+        return migratePlainPasswordIfNeeded(localMatch, normalizedPassword);
     }
 
     if (hasSupabase && supabase) {
@@ -196,6 +235,7 @@ export async function addUserProfile(input: Omit<UserProfile, "id" | "created_at
     if (localUsers.some((row) => row.email.toLowerCase() === email)) {
         throw new Error("Email already exists");
     }
+    const hashedPassword = await passwordHash(email, password);
     // We intentionally keep this local-first because creating auth.users in Supabase
     // requires service role admin APIs (not available from client-side).
     const created: UserProfile = {
@@ -204,7 +244,7 @@ export async function addUserProfile(input: Omit<UserProfile, "id" | "created_at
         full_name: fullName,
         role: input.role,
         school_id: input.school_id,
-        password,
+        password_hash: hashedPassword,
         is_premium: input.is_premium,
         created_at: new Date().toISOString(),
     };
@@ -223,7 +263,11 @@ export async function resetLocalUserPassword(userId: string, nextPassword: strin
     if (index < 0) {
         throw new Error("User not found");
     }
-    rows[index] = { ...rows[index], password };
+    rows[index] = {
+        ...rows[index],
+        password_hash: await passwordHash(rows[index].email, password),
+    };
+    delete (rows[index] as any).password;
     writeLocal(DB.users, rows);
     return rows[index];
 }
@@ -245,10 +289,16 @@ export async function changeMyPassword(input: {
         throw new Error("User not found");
     }
     const user = rows[index];
-    if ((user.password || "") !== currentPassword) {
+    const currentHash = user.password_hash || (user.password ? await passwordHash(user.email, user.password) : "");
+    const incomingCurrentHash = await passwordHash(user.email, currentPassword);
+    if (!currentHash || incomingCurrentHash !== currentHash) {
         throw new Error("Current password is incorrect");
     }
-    rows[index] = { ...user, password: nextPassword };
+    rows[index] = {
+        ...user,
+        password_hash: await passwordHash(user.email, nextPassword),
+    };
+    delete (rows[index] as any).password;
     writeLocal(DB.users, rows);
 
     if (hasSupabase && supabase) {

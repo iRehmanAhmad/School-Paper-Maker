@@ -17,6 +17,11 @@ export function SettingsPage() {
   const [passwordConfirm, setPasswordConfirm] = useState("");
   const [changingPassword, setChangingPassword] = useState(false);
 
+  // Multi-key pool state
+  const [newKeyProvider, setNewKeyProvider] = useState<AIProvider>("groq");
+  const [newKeyLabel, setNewKeyLabel] = useState("");
+  const [newKeyValue, setNewKeyValue] = useState("");
+
   useEffect(() => {
     let active = true;
     async function loadCloudSettings() {
@@ -130,6 +135,8 @@ export function SettingsPage() {
     deepseek: "deepseek-chat",
     anthropic: "claude-3-5-sonnet-20240620",
     openai: "gpt-4o-mini",
+    qwen: "qwen-plus",
+    siliconflow: "deepseek-ai/DeepSeek-V3",
     supabase: "ai-generate-questions"
   };
 
@@ -141,10 +148,51 @@ export function SettingsPage() {
     deepseek: "https://platform.deepseek.com/api_keys",
     anthropic: "https://console.anthropic.com/",
     openai: "https://platform.openai.com/api-keys",
+    qwen: "https://dashscope.console.aliyun.com/apiKey",
+    siliconflow: "https://cloud.siliconflow.cn/account/ak",
   };
 
   const applyPreset = (prov: AIProvider) => {
     setAi(prev => ({ ...prev, provider: prov, model: modelPresets[prov] }));
+  };
+
+  const addKeyToPool = () => {
+    if (!newKeyValue) {
+      toast("error", "Please enter an API key");
+      return;
+    }
+    const newEntry = {
+      id: crypto.randomUUID(),
+      provider: newKeyProvider,
+      key: newKeyValue,
+      label: newKeyLabel || `${newKeyProvider} Key`,
+      usageCount: 0,
+      isExhausted: false,
+    };
+    setAi(prev => ({
+      ...prev,
+      keyPool: [...(prev.keyPool || []), newEntry],
+      // Also update the primary key field for the provider if it's the first one
+      [`${newKeyProvider}ApiKey`]: prev[`${newKeyProvider}ApiKey` as keyof typeof prev] || newKeyValue
+    }));
+    setNewKeyValue("");
+    setNewKeyLabel("");
+    toast("success", `Added ${newKeyProvider} key to vault`);
+  };
+
+  const removeKeyFromPool = (id: string) => {
+    setAi(prev => ({
+      ...prev,
+      keyPool: prev.keyPool.filter(k => k.id !== id)
+    }));
+    toast("success", "Key removed from vault");
+  };
+
+  const toggleKeyExhaustion = (id: string) => {
+    setAi(prev => ({
+      ...prev,
+      keyPool: prev.keyPool.map(k => k.id === id ? { ...k, isExhausted: !k.isExhausted } : k)
+    }));
   };
 
   return (
@@ -287,8 +335,8 @@ export function SettingsPage() {
                     key={t}
                     onClick={() => updateTheme(t)}
                     className={`flex-1 flex flex-col items-center gap-1.5 py-3 rounded-lg transition-all ${appSettings.theme === t
-                        ? 'bg-card text-brand shadow-sm ring-1 ring-slate-900/5'
-                        : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'
+                      ? 'bg-card text-brand shadow-sm ring-1 ring-slate-900/5'
+                      : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'
                       }`}
                   >
                     <span className="text-lg">
@@ -361,12 +409,14 @@ export function SettingsPage() {
                   <optgroup label="Recommended Free Tiers" className="bg-bg dark:bg-slate-800">
                     <option value="groq">Groq (Ultra-Fast & Free)</option>
                     <option value="gemini">Google Gemini (Generous Free Tier)</option>
+                    <option value="qwen">Qwen (Generous Free Tier)</option>
                     <option value="openrouter">OpenRouter (Multiple Free Models)</option>
                   </optgroup>
                   <optgroup label="Premium / Other" className="bg-bg dark:bg-slate-800">
                     <option value="openai">OpenAI (GPT-4o / Mini)</option>
                     <option value="anthropic">Anthropic (Claude 3.5)</option>
                     <option value="deepseek">DeepSeek (Best Value)</option>
+                    <option value="siliconflow">Silicon Flow (Affordable Aggregator)</option>
                     <option value="together">Together AI</option>
                   </optgroup>
                   <optgroup label="Legacy" className="bg-bg dark:bg-slate-800">
@@ -408,6 +458,106 @@ export function SettingsPage() {
                   ))}
                 </div>
               </div>
+            </div>
+          </div>
+
+          <div className="mt-8 pt-8 border-t border-slate-100 dark:border-slate-800">
+            <h4 className="text-sm font-bold text-slate-700 dark:text-slate-300 mb-4 flex items-center gap-2">
+              <span className="p-1.5 bg-brand/10 text-brand rounded-lg text-xs">🔑</span>
+              AI Key Vault (Advanced Fallback)
+            </h4>
+
+            {/* Add New Key Form */}
+            <div className="mb-6 p-4 rounded-xl border border-dashed border-slate-300 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-900/30">
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-3">Add Multiple Keys per Company</p>
+              <div className="grid sm:grid-cols-4 gap-3">
+                <select
+                  className="rounded-lg border border-slate-200 dark:border-slate-800 bg-card px-3 py-2 text-xs outline-none focus:border-brand"
+                  value={newKeyProvider}
+                  onChange={e => setNewKeyProvider(e.target.value as AIProvider)}
+                >
+                  <option value="groq">Groq</option>
+                  <option value="gemini">Gemini</option>
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="qwen">Qwen</option>
+                  <option value="siliconflow">Silicon Flow</option>
+                  <option value="openai">OpenAI</option>
+                  <option value="openrouter">OpenRouter</option>
+                </select>
+                <input
+                  placeholder="Label (e.g. My Free Key)"
+                  className="rounded-lg border border-slate-200 dark:border-slate-800 bg-card px-3 py-2 text-xs outline-none focus:border-brand"
+                  value={newKeyLabel}
+                  onChange={e => setNewKeyLabel(e.target.value)}
+                />
+                <input
+                  type="password"
+                  placeholder="API Key..."
+                  className="rounded-lg border border-slate-200 dark:border-slate-800 bg-card px-3 py-2 text-xs outline-none focus:border-brand"
+                  value={newKeyValue}
+                  onChange={e => setNewKeyValue(e.target.value)}
+                />
+                <button
+                  onClick={addKeyToPool}
+                  className="rounded-lg bg-brand text-white text-xs font-bold py-2 hover:bg-brand/90 transition-colors"
+                >
+                  Add to Vault
+                </button>
+              </div>
+            </div>
+
+            {/* Key List */}
+            <div className="space-y-2">
+              {ai.keyPool && ai.keyPool.length > 0 ? (
+                ai.keyPool.map((keyEntry) => (
+                  <div key={keyEntry.id} className={`flex flex-col sm:flex-row sm:items-center justify-between p-3 rounded-xl border transition-all ${keyEntry.isExhausted ? 'bg-red-50/50 dark:bg-red-900/10 border-red-100 dark:border-red-900/30 opacity-75' : 'bg-bg dark:bg-slate-900/50 border-slate-200 dark:border-slate-800'}`}>
+                    <div className="flex items-center gap-3">
+                      <div className="flex flex-col">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold text-ink capitalize">{keyEntry.provider}</span>
+                          <span className="text-[10px] text-slate-500">— {keyEntry.label}</span>
+                          {keyEntry.isExhausted && <span className="text-[8px] font-black bg-red-500 text-white px-1 rounded">EXHAUSTED</span>}
+                        </div>
+                        <div className="flex items-center gap-4 mt-1">
+                          <span className="text-[10px] text-slate-400 font-medium flex items-center gap-1">
+                            <span className="w-1 h-1 rounded-full bg-slate-300"></span>
+                            Used {keyEntry.usageCount} times
+                          </span>
+                          {keyEntry.quotaRemaining && (
+                            <span className="text-[10px] text-brand/70 font-bold flex items-center gap-1">
+                              <span className="w-1 h-1 rounded-full bg-brand"></span>
+                              {keyEntry.quotaRemaining}
+                            </span>
+                          )}
+                          {keyEntry.lastUsed && (
+                            <span className="text-[10px] text-slate-400 font-medium">
+                              Last used: {new Date(keyEntry.lastUsed).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3 mt-3 sm:mt-0">
+                      <button
+                        onClick={() => toggleKeyExhaustion(keyEntry.id)}
+                        className={`text-[9px] font-bold px-2 py-1 rounded border transition-colors ${keyEntry.isExhausted ? 'bg-emerald-500 text-white border-emerald-500' : 'text-slate-500 border-slate-200 dark:border-slate-800 hover:border-red-500 hover:text-red-500'}`}
+                      >
+                        {keyEntry.isExhausted ? "Retry Key" : "Mark Full"}
+                      </button>
+                      <button
+                        onClick={() => removeKeyFromPool(keyEntry.id)}
+                        className="text-[9px] font-bold px-2 py-1 rounded border border-slate-200 dark:border-slate-800 text-red-500 hover:bg-red-500 hover:text-white transition-all"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="text-center py-8 bg-slate-50/50 dark:bg-slate-900/20 rounded-2xl border border-dashed border-slate-200 dark:border-slate-800">
+                  <p className="text-sm text-slate-400 font-medium">No keys in the vault. Add your first key above!</p>
+                </div>
+              )}
             </div>
           </div>
 

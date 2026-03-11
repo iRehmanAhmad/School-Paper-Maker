@@ -5,8 +5,12 @@ import * as XLSX from "xlsx";
 import { discussGenerationStrategy, generateQuestionsFromPdf, type AIGeneratedQuestion, type ChatMessage } from "@/services/ai";
 import { ConfirmModal } from "@/components/ConfirmModal";
 import { EmptyState } from "@/components/EmptyState";
+import { LoadingTable } from "@/components/LoadingState";
+import { BulkActionsToolbar } from "@/components/BulkActionsToolbar";
+import { BulkEditModal, type BulkEditValues } from "@/components/BulkEditModal";
 import { useHierarchyScopeParams } from "@/hooks/useHierarchyScopeParams";
 import { addQuestions, deleteQuestionsByIds, getGenerationCandidates, getGenerationJobs, getQuestions, getTopics, updateQuestionById } from "@/services/repositories";
+import { bulkUpdateQuestions, bulkDuplicateQuestions, bulkExportQuestionsToCSV, downloadCSV } from "@/services/bulkOperations";
 import { useUndoDeleteQueue } from "@/hooks/useUndoDeleteQueue";
 import { useAppStore } from "@/store/useAppStore";
 import { useHierarchy } from "@/hooks/useHierarchy";
@@ -153,6 +157,8 @@ export function QuestionBankPage() {
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [deleteIntent, setDeleteIntent] = useState<DeleteQuestionIntent | null>(null);
   const [isDeletingQuestions, setIsDeletingQuestions] = useState(false);
+  const [showBulkEditModal, setShowBulkEditModal] = useState(false);
+  const [isBulkProcessing, setIsBulkProcessing] = useState(false);
 
   const [entryMode, setEntryMode] = useState<"manual" | "upload" | "ai" | "">("");
   const [contextLocked, setContextLocked] = useState(false);
@@ -1039,6 +1045,76 @@ export function QuestionBankPage() {
     }
     prepareDeleteIntent(selectedQuestionIds, `Delete ${selectedQuestionIds.length} selected question(s)?`);
   }
+
+  // Bulk Operations
+  async function handleBulkEdit(updates: Partial<BulkEditValues>) {
+    if (!selectedQuestionIds.length) {
+      toast("error", "No questions selected");
+      return;
+    }
+
+    setIsBulkProcessing(true);
+    try {
+      const result = await bulkUpdateQuestions(selectedQuestionIds, updates);
+      
+      if (result.success > 0) {
+        toast("success", `Updated ${result.success} question${result.success !== 1 ? "s" : ""}`);
+        await fetchQuestions();
+        setSelectedQuestionIds([]);
+      }
+      
+      if (result.failed > 0) {
+        toast("error", `Failed to update ${result.failed} question${result.failed !== 1 ? "s" : ""}`);
+      }
+    } catch (error) {
+      toast("error", error instanceof Error ? error.message : "Bulk update failed");
+    } finally {
+      setIsBulkProcessing(false);
+    }
+  }
+
+  async function handleBulkDuplicate() {
+    if (!selectedQuestionIds.length) {
+      toast("error", "No questions selected");
+      return;
+    }
+
+    setIsBulkProcessing(true);
+    try {
+      const result = await bulkDuplicateQuestions(selectedQuestionIds, questions);
+      
+      if (result.success > 0) {
+        toast("success", `Duplicated ${result.success} question${result.success !== 1 ? "s" : ""}`);
+        await fetchQuestions();
+        setSelectedQuestionIds(result.newIds);
+      }
+      
+      if (result.failed > 0) {
+        toast("error", `Failed to duplicate ${result.failed} question${result.failed !== 1 ? "s" : ""}`);
+      }
+    } catch (error) {
+      toast("error", error instanceof Error ? error.message : "Bulk duplicate failed");
+    } finally {
+      setIsBulkProcessing(false);
+    }
+  }
+
+  function handleBulkExport() {
+    if (!selectedQuestionIds.length) {
+      toast("error", "No questions selected");
+      return;
+    }
+
+    const selectedQuestions = questions.filter((q) => selectedQuestionIds.includes(q.id));
+    const csv = bulkExportQuestionsToCSV(selectedQuestions);
+    const filename = `questions_export_${new Date().toISOString().split('T')[0]}.csv`;
+    downloadCSV(csv, filename);
+    toast("success", `Exported ${selectedQuestions.length} question${selectedQuestions.length !== 1 ? "s" : ""} to CSV`);
+  }
+
+  function handleClearSelection() {
+    setSelectedQuestionIds([]);
+  }
   async function handleFileSelection(file: File) {
     if (!profile?.school_id || !activeChapterId) {
       toast("error", "Please lock a chapter context first");
@@ -1389,18 +1465,17 @@ export function QuestionBankPage() {
               </div>
             </div>
 
-            {selectedQuestionIds.length > 0 && (
-              <div className="flex items-center justify-between rounded-xl border border-red-200 bg-red-50 px-4 py-2">
-                <p className="text-xs font-semibold text-red-700">{selectedQuestionIds.length} selected</p>
-                <button
-                  type="button"
-                  onClick={deleteSelectedQuestions}
-                  className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-red-700"
-                >
-                  Delete Selected
-                </button>
-              </div>
-            )}
+            {/* Bulk Actions Toolbar */}
+            <BulkActionsToolbar
+              selectedCount={selectedQuestionIds.length}
+              totalCount={filteredQuestions.length}
+              onClearSelection={handleClearSelection}
+              onBulkEdit={() => setShowBulkEditModal(true)}
+              onBulkDelete={deleteSelectedQuestions}
+              onBulkDuplicate={handleBulkDuplicate}
+              onBulkExport={handleBulkExport}
+              isProcessing={isBulkProcessing}
+            />
 
             <div className="overflow-x-auto overflow-y-visible rounded-xl border border-slate-200 bg-white">
               {!chapterId && (
@@ -1428,7 +1503,9 @@ export function QuestionBankPage() {
                 <tbody>
                   {loadingQuestions && (
                     <tr>
-                      <td colSpan={5} className="px-4 py-8 text-center text-sm text-slate-500">Loading questions...</td>
+                      <td colSpan={5} className="px-4 py-4">
+                        <LoadingTable rows={8} columns={5} />
+                      </td>
                     </tr>
                   )}
 
@@ -2370,6 +2447,17 @@ export function QuestionBankPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Bulk Edit Modal */}
+      {showBulkEditModal && (
+        <BulkEditModal
+          selectedCount={selectedQuestionIds.length}
+          onClose={() => setShowBulkEditModal(false)}
+          onApply={handleBulkEdit}
+          availableChapters={visibleChapters.map((c) => ({ id: c.id, title: c.title }))}
+          availableTopics={visibleTopics.map((t) => ({ id: t.id, title: t.title }))}
+        />
       )}
     </div>
   );
