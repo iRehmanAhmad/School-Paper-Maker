@@ -1,14 +1,20 @@
 import React, { useEffect, useState } from "react";
-import { getAISettings, getSchoolAISettings, saveSchoolAISettings, type AIProvider } from "@/services/aiSettings";
+import { getAISettings, getSchoolAISettings, saveSchoolAISettings, saveAISettings } from "@/services/aiSettings";
+import { type AIProvider, type AISettings } from "@/types/ai";
+import { refreshKeyStatus } from "@/services/ai";
 import { getAppSettings, saveAppSettings } from "@/services/appSettings";
 import { changeMyPassword } from "@/services/repositories";
 import { hasSupabase } from "@/services/supabase";
 import { useAppStore } from "@/store/useAppStore";
+import { testKeyConnection } from "@/services/ai";
+import { AIKeyEntry } from "@/types/ai";
 
 export function SettingsPage() {
   const profile = useAppStore((s) => s.profile);
   const toast = useAppStore((s) => s.pushToast);
-  const [ai, setAi] = useState(getAISettings());
+  const aiState = useAppStore((s) => s.aiSettings);
+  const setAi = useAppStore((s) => s.setAiSettings);
+  const ai = aiState || getAISettings();
   const [appSettings, setAppSettings] = useState(getAppSettings());
   const [loadingCloudAI, setLoadingCloudAI] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -16,6 +22,10 @@ export function SettingsPage() {
   const [passwordNext, setPasswordNext] = useState("");
   const [passwordConfirm, setPasswordConfirm] = useState("");
   const [changingPassword, setChangingPassword] = useState(false);
+  const currentProviderKey = (ai[`${ai.provider}ApiKey` as keyof AISettings] as string) || "";
+  const [providerKeyDraft, setProviderKeyDraft] = useState(currentProviderKey);
+  const [savingAI, setSavingAI] = useState(false);
+  const [testingKeyId, setTestingKeyId] = useState<string | null>(null);
 
   // Multi-key pool state
   const [newKeyProvider, setNewKeyProvider] = useState<AIProvider>("groq");
@@ -40,6 +50,17 @@ export function SettingsPage() {
       active = false;
     };
   }, [profile?.school_id]);
+
+  // Auto-refresh AI status on enter
+  useEffect(() => {
+    if (ai.keyPool) {
+      ai.keyPool.forEach((key) => void refreshKeyStatus(key));
+    }
+  }, []);
+
+  useEffect(() => {
+    setProviderKeyDraft(currentProviderKey);
+  }, [ai.provider, currentProviderKey]);
 
   const applyThemePreview = (theme: "light" | "dark" | "system") => {
     const root = window.document.documentElement;
@@ -92,6 +113,22 @@ export function SettingsPage() {
     }
   }
 
+  async function saveAIOnly(next: AISettings) {
+    setSavingAI(true);
+    try {
+      await saveSchoolAISettings(profile?.school_id, next, profile?.id);
+      if (hasSupabase && profile?.school_id) {
+        toast("success", "AI settings saved to cloud");
+      } else {
+        toast("success", "AI settings saved locally");
+      }
+    } catch (error) {
+      toast("error", error instanceof Error ? error.message : "Saved locally, cloud save failed");
+    } finally {
+      setSavingAI(false);
+    }
+  }
+
   async function updatePassword() {
     if (!profile?.id) {
       toast("error", "No active user");
@@ -139,6 +176,21 @@ export function SettingsPage() {
     siliconflow: "deepseek-ai/DeepSeek-V3",
     supabase: "ai-generate-questions"
   };
+  const getKeyModel = (keyEntry: AISettings["keyPool"][number]) => {
+    return keyEntry.model || (keyEntry.provider === ai.provider ? ai.model : modelPresets[keyEntry.provider]);
+  };
+
+  const selectKeyModel = (keyEntry: AISettings["keyPool"][number]) => {
+    const model = getKeyModel(keyEntry) || modelPresets[keyEntry.provider];
+    const trimmed = model.trim();
+    if (!trimmed) return;
+    saveAISettings({
+      ...ai,
+      provider: keyEntry.provider,
+      model: trimmed,
+      activeKeyId: keyEntry.id,
+    });
+  };
 
   const providerLinks: Partial<Record<AIProvider, string>> = {
     groq: "https://console.groq.com/keys",
@@ -153,7 +205,7 @@ export function SettingsPage() {
   };
 
   const applyPreset = (prov: AIProvider) => {
-    setAi(prev => ({ ...prev, provider: prov, model: modelPresets[prov] }));
+    saveAISettings({ ...ai, provider: prov, model: modelPresets[prov] });
   };
 
   const addKeyToPool = () => {
@@ -161,38 +213,101 @@ export function SettingsPage() {
       toast("error", "Please enter an API key");
       return;
     }
+    const providerCount = (ai.keyPool || []).filter(k => k.provider === newKeyProvider).length;
+    const stamp = new Date().toLocaleDateString() + " " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     const newEntry = {
       id: crypto.randomUUID(),
       provider: newKeyProvider,
       key: newKeyValue,
-      label: newKeyLabel || `${newKeyProvider} Key`,
+      label: newKeyLabel || `${newKeyProvider} Key #${providerCount + 1} • ${stamp}`,
       usageCount: 0,
       isExhausted: false,
+      model: modelPresets[newKeyProvider],
     };
-    setAi(prev => ({
-      ...prev,
-      keyPool: [...(prev.keyPool || []), newEntry],
+    const next = {
+      ...ai,
+      keyPool: [...(ai.keyPool || []), newEntry],
       // Also update the primary key field for the provider if it's the first one
-      [`${newKeyProvider}ApiKey`]: prev[`${newKeyProvider}ApiKey` as keyof typeof prev] || newKeyValue
-    }));
+      [`${newKeyProvider}ApiKey`]: (ai[`${newKeyProvider}ApiKey` as keyof typeof ai] as string) || newKeyValue,
+      activeKeyId: ai.activeKeyId || newEntry.id,
+    } as AISettings;
+    saveAISettings(next);
+    void saveAIOnly(next);
     setNewKeyValue("");
     setNewKeyLabel("");
     toast("success", `Added ${newKeyProvider} key to vault`);
   };
 
+  const handleTestConnection = async (keyEntry: AIKeyEntry | { provider: AIProvider, key: string }) => {
+    const id = (keyEntry as AIKeyEntry).id || "draft";
+    setTestingKeyId(id);
+    try {
+      const res = await testKeyConnection(id === "draft" ? { id: "draft", usageCount: 0, ...keyEntry } as AIKeyEntry : keyEntry as AIKeyEntry);
+      if (res.ok) {
+        toast("success", `${keyEntry.provider.toUpperCase()} connection successful! API key is valid.`);
+      } else {
+        toast("error", `${keyEntry.provider.toUpperCase()} test failed: ${res.error}`);
+      }
+    } finally {
+      setTestingKeyId(null);
+      if (id !== "draft") {
+        void refreshKeyStatus(keyEntry as AIKeyEntry);
+      }
+    }
+  };
+
+  const saveProviderKey = () => {
+    const trimmed = providerKeyDraft.trim();
+    if (!trimmed) {
+      toast("error", "Please enter an API key");
+      return;
+    }
+    const keyField = `${ai.provider}ApiKey` as keyof AISettings;
+    const existing = (ai.keyPool || []).find((k) => k.provider === ai.provider && k.key === trimmed);
+    const keyPool = existing
+      ? (ai.keyPool || []).map((k) =>
+        k.id === existing.id
+          ? { ...k, isExhausted: false, quotaRemaining: undefined }
+          : k
+      )
+      : [
+        ...(ai.keyPool || []),
+        {
+          id: crypto.randomUUID(),
+          provider: ai.provider,
+          key: trimmed,
+          label: "Primary Key",
+          usageCount: 0,
+          isExhausted: false,
+          model: ai.model || modelPresets[ai.provider],
+        },
+      ];
+    const next = {
+      ...ai,
+      [keyField]: trimmed,
+      keyPool,
+      activeKeyId: existing ? existing.id : keyPool[keyPool.length - 1]?.id,
+    } as AISettings;
+    saveAISettings(next);
+    void saveAIOnly(next);
+    toast("success", "API key saved");
+  };
+
   const removeKeyFromPool = (id: string) => {
-    setAi(prev => ({
-      ...prev,
-      keyPool: prev.keyPool.filter(k => k.id !== id)
-    }));
+    const nextPool = ai.keyPool.filter((k) => k.id !== id);
+    saveAISettings({
+      ...ai,
+      keyPool: nextPool,
+      activeKeyId: ai.activeKeyId === id ? (nextPool[0]?.id || "") : ai.activeKeyId,
+    });
     toast("success", "Key removed from vault");
   };
 
   const toggleKeyExhaustion = (id: string) => {
-    setAi(prev => ({
-      ...prev,
-      keyPool: prev.keyPool.map(k => k.id === id ? { ...k, isExhausted: !k.isExhausted } : k)
-    }));
+    saveAISettings({
+      ...ai,
+      keyPool: ai.keyPool.map((k) => k.id === id ? { ...k, isExhausted: !k.isExhausted } : k),
+    });
   };
 
   return (
@@ -428,7 +543,13 @@ export function SettingsPage() {
               <label className="block text-sm font-bold text-slate-700 dark:text-slate-300">
                 AI Model ID
                 <div className="relative">
-                  <input className="mt-1.5 w-full rounded-xl border border-slate-300 dark:border-slate-700 px-4 py-2.5 focus:border-brand outline-none bg-bg dark:bg-slate-900/50 text-ink" value={ai.model} onChange={(e) => setAi((p) => ({ ...p, model: e.target.value }))} placeholder="e.g. llama-3.3-70b-versatile" />
+                <input
+                  className="mt-1.5 w-full rounded-xl border border-slate-300 dark:border-slate-700 px-4 py-2.5 focus:border-brand outline-none bg-bg dark:bg-slate-900/50 text-ink"
+                  value={ai.model}
+                  onChange={(e) => saveAISettings({ ...ai, model: e.target.value })}
+                  onBlur={() => saveAISettings({ ...ai, model: ai.model })}
+                  placeholder="e.g. llama-3.3-70b-versatile"
+                />
                   <button onClick={() => applyPreset(ai.provider)} className="absolute right-2 top-[50%] -translate-y-[15%] p-1.5 text-brand text-[10px] font-bold uppercase tracking-tight">Auto-Fill</button>
                 </div>
               </label>
@@ -444,20 +565,33 @@ export function SettingsPage() {
 
             <div className="space-y-4">
               <label className="block text-sm font-bold text-slate-700 dark:text-slate-300">
-                {ai.provider.charAt(0).toUpperCase() + ai.provider.slice(1)} API Key
-                <input type="password" className="mt-1.5 w-full rounded-xl border border-slate-300 dark:border-slate-700 px-4 py-2.5 focus:border-brand outline-none bg-bg dark:bg-slate-900/50 text-ink" value={ai[`${ai.provider}ApiKey` as keyof typeof ai] || ""} onChange={(e) => setAi(p => ({ ...p, [`${ai.provider}ApiKey`]: e.target.value }))} placeholder="Paste your key here..." />
-              </label>
-
-              <div className="p-4 rounded-xl bg-bg dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800">
-                <p className="text-xs font-bold text-slate-500 uppercase mb-2">Suggestions</p>
-                <div className="flex flex-wrap gap-2 text-xs">
-                  {Object.keys(modelPresets).slice(0, 4).map(k => (
-                    <button key={k} onClick={() => applyPreset(k as AIProvider)} className={`px-2 py-1 rounded border transition-colors ${ai.provider === k ? 'bg-brand text-white border-brand' : 'bg-card text-ink border-slate-200 dark:border-slate-700 hover:border-brand'}`}>
-                      {k}
-                    </button>
-                  ))}
+                {(ai.provider || "groq").charAt(0).toUpperCase() + (ai.provider || "groq").slice(1)} API Key
+                <div className="flex gap-2 mt-1.5">
+                  <input
+                    type="password"
+                    className="flex-1 rounded-xl border border-slate-300 dark:border-slate-700 px-4 py-2.5 focus:border-brand outline-none bg-bg dark:bg-slate-900/50 text-ink"
+                    value={providerKeyDraft}
+                    onChange={(e) => setProviderKeyDraft(e.target.value)}
+                    placeholder="Paste your key here..."
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleTestConnection({ provider: ai.provider, key: providerKeyDraft })}
+                    disabled={testingKeyId === "draft" || !providerKeyDraft}
+                    className="px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 text-ink text-xs font-bold uppercase tracking-wide hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-60"
+                  >
+                    {testingKeyId === "draft" ? "Testing..." : "Test"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={saveProviderKey}
+                    disabled={savingAI}
+                    className="px-4 py-2.5 rounded-xl bg-brand text-white text-xs font-bold uppercase tracking-wide shadow-lg shadow-brand/20 hover:bg-brand/90 disabled:opacity-60"
+                  >
+                    {savingAI ? "Saving..." : "Save Key"}
+                  </button>
                 </div>
-              </div>
+              </label>
             </div>
           </div>
 
@@ -523,21 +657,50 @@ export function SettingsPage() {
                             <span className="w-1 h-1 rounded-full bg-slate-300"></span>
                             Used {keyEntry.usageCount} times
                           </span>
-                          {keyEntry.quotaRemaining && (
-                            <span className="text-[10px] text-brand/70 font-bold flex items-center gap-1">
-                              <span className="w-1 h-1 rounded-full bg-brand"></span>
-                              {keyEntry.quotaRemaining}
-                            </span>
-                          )}
+                          <span className="text-[10px] text-brand/70 font-bold flex items-center gap-1">
+                            <span className="w-1 h-1 rounded-full bg-brand"></span>
+                            {keyEntry.quotaRemaining || "Quota not checked"}
+                          </span>
                           {keyEntry.lastUsed && (
                             <span className="text-[10px] text-slate-400 font-medium">
                               Last used: {new Date(keyEntry.lastUsed).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                             </span>
                           )}
+                          {keyEntry.lastError && (
+                            <span className="text-[10px] text-red-500 font-bold ml-1">
+                              ⚠️ {keyEntry.lastError}
+                            </span>
+                          )}
                         </div>
                       </div>
                     </div>
-                    <div className="flex items-center gap-3 mt-3 sm:mt-0">
+                    <div className="flex items-start gap-3 mt-3 sm:mt-0">
+                      <button
+                        type="button"
+                        onClick={() => selectKeyModel(keyEntry)}
+                        className={`px-2 py-1 rounded-md border text-[10px] font-bold uppercase tracking-wide text-left transition-colors ${ai.activeKeyId === keyEntry.id
+                          ? "bg-brand text-white border-brand"
+                          : "bg-card text-ink border-slate-200 dark:border-slate-700 hover:border-brand"
+                          }`}
+                        title={ai.activeKeyId === keyEntry.id ? "In Use" : "Switch to this key"}
+                      >
+                        {ai.activeKeyId === keyEntry.id ? "✓ In Use — " : ""}{getKeyModel(keyEntry)}
+                      </button>
+                      <button
+                        onClick={() => void handleTestConnection(keyEntry)}
+                        disabled={testingKeyId === keyEntry.id}
+                        className={`p-1.5 rounded-lg border border-slate-200 dark:border-slate-800 text-xs font-bold uppercase tracking-tight transition-all flex items-center justify-center h-8 px-3 ${testingKeyId === keyEntry.id ? "bg-slate-100 opacity-60" : "hover:border-brand hover:text-brand"}`}
+                        title="Test Connection"
+                      >
+                        {testingKeyId === keyEntry.id ? "..." : "Test Online"}
+                      </button>
+                      <button
+                        onClick={() => void refreshKeyStatus(keyEntry)}
+                        className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-800 text-slate-500 hover:text-brand hover:border-brand transition-all flex items-center justify-center h-8"
+                        title="Refresh Status"
+                      >
+                        🔄
+                      </button>
                       <button
                         onClick={() => toggleKeyExhaustion(keyEntry.id)}
                         className={`text-[9px] font-bold px-2 py-1 rounded border transition-colors ${keyEntry.isExhausted ? 'bg-emerald-500 text-white border-emerald-500' : 'text-slate-500 border-slate-200 dark:border-slate-800 hover:border-red-500 hover:text-red-500'}`}
@@ -565,16 +728,10 @@ export function SettingsPage() {
             <p className="text-xs text-slate-500 italic">
               Keys save locally and sync to your school cloud profile when Supabase is connected.
             </p>
-            <button
-              className="px-8 py-3 rounded-xl bg-brand text-white font-bold shadow-lg shadow-brand/20 hover:scale-[1.02] active:scale-[0.98] transition-all disabled:opacity-60 disabled:cursor-not-allowed"
-              onClick={() => void saveAll()}
-              disabled={saving}
-            >
-              {saving ? "Saving..." : "Save All Settings"}
-            </button>
           </div>
         </div>
       </div>
     </div>
   );
 }
+

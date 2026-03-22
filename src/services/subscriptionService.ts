@@ -1,7 +1,21 @@
-import { hasSupabase, supabase } from "@/services/supabase";
+import { canUseSupabase, supabase } from "@/services/supabase";
 import type { ArtifactType, PaymentProvider, Subscription, SubscriptionPlan, SubscriptionPlanCode, SubscriptionStatus } from "@/types/domain";
 import { DB, ensureSeed, readLocal, writeLocal } from "./baseService";
-let subscriptionTablesAvailable: boolean | null = null;
+
+const SUBS_AVAIL_KEY = "pg_sub_tables_avail";
+let _subsTablesAvail: boolean | null = null;
+
+function getSubsAvail(): boolean {
+  if (_subsTablesAvail !== null) return _subsTablesAvail;
+  const cached = localStorage.getItem(SUBS_AVAIL_KEY);
+  if (cached === "false") { _subsTablesAvail = false; return false; }
+  return true; // default: try Supabase
+}
+
+function setSubsAvail(value: boolean) {
+  _subsTablesAvail = value;
+  localStorage.setItem(SUBS_AVAIL_KEY, String(value));
+}
 
 export type SubscriptionSummary = {
   subscription: Subscription | null;
@@ -106,14 +120,10 @@ function sortPlans(plans: SubscriptionPlan[]) {
 }
 
 async function ensureSupabaseDefaultSubscription(schoolId: string) {
-  if (!hasSupabase || !supabase) return;
-  if (subscriptionTablesAvailable === false) return;
+  if (!canUseSupabase() || !getSubsAvail()) return;
   const { data: existing, error: existingError } = await supabase.from("subscriptions").select("*").eq("school_id", schoolId).maybeSingle();
   if (existingError) {
-    if (isMissingTableError(existingError)) {
-      subscriptionTablesAvailable = false;
-      return;
-    }
+    if (isMissingTableError(existingError)) { setSubsAvail(false); return; }
     throw existingError;
   }
   if (existing) return;
@@ -124,64 +134,49 @@ async function ensureSupabaseDefaultSubscription(schoolId: string) {
   const ends = new Date(starts);
   ends.setMonth(ends.getMonth() + 1);
   await supabase.from("subscriptions").insert({
-    school_id: schoolId,
-    plan_id: basic.id,
-    status: "active",
-    starts_at: starts.toISOString(),
-    ends_at: ends.toISOString(),
-    created_by: null,
+    school_id: schoolId, plan_id: basic.id, status: "active",
+    starts_at: starts.toISOString(), ends_at: ends.toISOString(), created_by: null,
   });
-  subscriptionTablesAvailable = true;
+  setSubsAvail(true);
 }
 
 export async function getSubscriptionPlans() {
-  if (hasSupabase && supabase) {
-    if (subscriptionTablesAvailable === false) {
-      ensureSeed();
-      const localPlans = readLocal<SubscriptionPlan>(DB.subscriptionPlans);
-      return localPlans.length ? sortPlans(localPlans) : sortPlans([DEFAULT_BASIC_PLAN, DEFAULT_ADVANCED_PLAN]);
-    }
+  if (canUseSupabase() && getSubsAvail()) {
     try {
       const { data, error } = await supabase.from("subscription_plans").select("*");
       if (error) {
-        if (isMissingTableError(error)) {
-          subscriptionTablesAvailable = false;
-        }
-        throw error;
+        if (isMissingTableError(error)) { setSubsAvail(false); }
+        else { throw error; }
+      } else {
+        setSubsAvail(true);
+        return sortPlans((data ?? []) as SubscriptionPlan[]);
       }
-      subscriptionTablesAvailable = true;
-      return sortPlans((data ?? []) as SubscriptionPlan[]);
-    } catch {
-      // Fall through to local/default plans when subscription tables are unavailable.
+    } catch (err) {
+      if (isMissingTableError(err)) { setSubsAvail(false); }
     }
   }
   ensureSeed();
   const localPlans = readLocal<SubscriptionPlan>(DB.subscriptionPlans);
-  if (localPlans.length) {
-    return sortPlans(localPlans);
-  }
-  return sortPlans([DEFAULT_BASIC_PLAN, DEFAULT_ADVANCED_PLAN]);
+  return localPlans.length ? sortPlans(localPlans) : sortPlans([DEFAULT_BASIC_PLAN, DEFAULT_ADVANCED_PLAN]);
 }
 
 export async function getSchoolSubscription(schoolId: string) {
-  if (hasSupabase && supabase) {
-    if (subscriptionTablesAvailable === false) {
-      ensureSeed();
-      return readLocal<Subscription>(DB.subscriptions).find((row) => row.school_id === schoolId) || null;
-    }
+  if (canUseSupabase() && getSubsAvail()) {
     try {
       await ensureSupabaseDefaultSubscription(schoolId);
+      if (!getSubsAvail()) {
+        return readLocal<Subscription>(DB.subscriptions).find((row) => row.school_id === schoolId) || null;
+      }
       const { data, error } = await supabase.from("subscriptions").select("*").eq("school_id", schoolId).maybeSingle();
       if (error) {
-        if (isMissingTableError(error)) {
-          subscriptionTablesAvailable = false;
-        }
-        throw error;
+        if (isMissingTableError(error)) { setSubsAvail(false); }
+        else { throw error; }
+      } else {
+        setSubsAvail(true);
+        return (data as Subscription | null) || null;
       }
-      subscriptionTablesAvailable = true;
-      return (data as Subscription | null) || null;
-    } catch {
-      // Fall through to local when table/policy is not ready.
+    } catch (err) {
+      if (isMissingTableError(err)) { setSubsAvail(false); }
     }
   }
   ensureSeed();
@@ -189,8 +184,8 @@ export async function getSchoolSubscription(schoolId: string) {
 }
 
 export async function upsertSchoolSubscription(input: UpsertSubscriptionInput) {
-  if (hasSupabase && supabase) {
-    if (subscriptionTablesAvailable === false) {
+  if (canUseSupabase()) {
+    if (!getSubsAvail()) {
       ensureSeed();
       const rows = readLocal<Subscription>(DB.subscriptions);
       const existingIndex = rows.findIndex((row) => row.school_id === input.school_id);
@@ -248,22 +243,18 @@ export async function upsertSchoolSubscription(input: UpsertSubscriptionInput) {
           .select("*")
           .single();
         if (error) {
-          if (isMissingTableError(error)) {
-            subscriptionTablesAvailable = false;
-          }
+          if (isMissingTableError(error)) { setSubsAvail(false); }
           throw error;
         }
-        subscriptionTablesAvailable = true;
+        setSubsAvail(true);
         return data as Subscription;
       }
       const { data, error } = await supabase.from("subscriptions").insert(input).select("*").single();
       if (error) {
-        if (isMissingTableError(error)) {
-          subscriptionTablesAvailable = false;
-        }
+        if (isMissingTableError(error)) { setSubsAvail(false); }
         throw error;
       }
-      subscriptionTablesAvailable = true;
+      setSubsAvail(true);
       return data as Subscription;
     } catch {
       // Fall through to local storage fallback when cloud table is unavailable.
@@ -386,3 +377,4 @@ export async function activateSubscriptionAfterPayment(input: {
 export function planCodeToLabel(code: SubscriptionPlanCode) {
   return code === "advanced" ? "Advanced" : "Basic";
 }
+

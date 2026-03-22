@@ -4,6 +4,7 @@ import { addClass, deleteClass, getClassDeleteImpact, getClasses, getExamBodies,
 import { ConfirmModal } from "@/components/ConfirmModal";
 import { ContextBreadcrumbs } from "@/components/ContextBreadcrumbs";
 import { EmptyState } from "@/components/EmptyState";
+import { GhostAutocompleteInput } from "@/components/GhostAutocompleteInput";
 import { SkeletonList } from "@/components/ui/skeleton";
 import { useHierarchyScopeParams } from "@/hooks/useHierarchyScopeParams";
 import { useUndoDeleteQueue } from "@/hooks/useUndoDeleteQueue";
@@ -217,12 +218,12 @@ export function ClassesPage() {
         </label>
         <label className="min-w-56 flex-1 text-xs font-semibold text-slate-600">
           Class Name
-          <input
-            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
+          <GhostAutocompleteInput
+            className="mt-1"
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={setName}
+            suggestion={findSuggestion(name, classSuggestions)}
             onKeyDown={onClassNameKeyDown}
-            autoComplete="off"
             placeholder="Class name (type then Tab to autocomplete)"
           />
         </label>

@@ -1,4 +1,4 @@
-import { hasSupabase, supabase } from "@/services/supabase";
+import { canUseSupabase, supabase } from "@/services/supabase";
 import type { ContentChunk, ContentSource, IngestStatus } from "@/types/domain";
 import { DB, ensureSeed, normalizeText, readLocal, writeLocal } from "./baseService";
 
@@ -53,7 +53,7 @@ function applySourceFilters(rows: ContentSource[], filters?: ContentSourceScopeF
 
 export async function getContentSources(schoolId: string, filters?: ContentSourceScopeFilters) {
   ensureSeed();
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     let query = supabase
       .from("content_sources")
       .select("*")
@@ -75,7 +75,7 @@ export async function getContentSources(schoolId: string, filters?: ContentSourc
 
 export async function getContentSourceById(sourceId: string) {
   ensureSeed();
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const { data, error } = await supabase.from("content_sources").select("*").eq("id", sourceId).single();
     if (error) throw error;
     return data as ContentSource;
@@ -93,7 +93,7 @@ export async function addContentSource(input: CreateContentSourceInput) {
   if (!filePath) throw new Error("File path is required");
   if (!fileHash) throw new Error("File hash is required");
 
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const scopeRows = await getContentSources(input.school_id, {
       exam_body_id: input.exam_body_id,
       class_id: input.class_id,
@@ -180,7 +180,7 @@ export async function updateContentSourceStatus(
   status: IngestStatus,
   patch?: { pages?: number | null; error_message?: string | null }
 ) {
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const { data, error } = await supabase
       .from("content_sources")
       .update({ status, pages: patch?.pages ?? null, error_message: patch?.error_message ?? null })
@@ -205,7 +205,7 @@ export async function updateContentSourceStatus(
 }
 
 export async function deleteContentSource(sourceId: string) {
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const { error } = await supabase.from("content_sources").delete().eq("id", sourceId);
     if (error) throw error;
     return;
@@ -216,7 +216,7 @@ export async function deleteContentSource(sourceId: string) {
 
 export async function getContentChunksBySource(sourceId: string) {
   ensureSeed();
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const { data, error } = await supabase
       .from("content_chunks")
       .select("*")
@@ -232,7 +232,7 @@ export async function getContentChunksBySource(sourceId: string) {
 
 export async function addContentChunks(rows: CreateContentChunkInput[]) {
   if (!rows.length) return [] as ContentChunk[];
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const { data, error } = await supabase.from("content_chunks").insert(rows).select("*");
     if (error) throw error;
     return (data ?? []) as ContentChunk[];
@@ -259,7 +259,7 @@ export async function searchContentChunks(params: ChunkSearchParams) {
   const limit = Math.max(1, Math.min(200, params.limit ?? 50));
   ensureSeed();
 
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     let query = supabase
       .from("content_chunks")
       .select("*")
@@ -286,3 +286,4 @@ export async function searchContentChunks(params: ChunkSearchParams) {
   if (queryText) rows = rows.filter((row) => row.content.toLowerCase().includes(queryText));
   return rows.sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, limit);
 }
+

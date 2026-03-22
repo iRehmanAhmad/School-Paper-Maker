@@ -1,4 +1,4 @@
-import { hasSupabase, supabase } from "@/services/supabase";
+import { canUseSupabase, supabase } from "@/services/supabase";
 import type { Worksheet, WorksheetItem } from "@/types/domain";
 import { DB, ensureSeed, readLocal, writeLocal } from "./baseService";
 
@@ -19,7 +19,7 @@ type WorksheetBundleItemInput = Omit<WorksheetItem, "id" | "worksheet_id"> & { w
 
 export async function getWorksheets(schoolId: string, filters?: WorksheetFilters) {
   ensureSeed();
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     let query = supabase
       .from("worksheets")
       .select("*")
@@ -48,7 +48,7 @@ export async function addWorksheet(input: CreateWorksheetInput) {
   const title = input.title.trim();
   if (!title) throw new Error("Worksheet title is required");
 
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const payload = {
       ...input,
       title,
@@ -79,7 +79,7 @@ export async function addWorksheet(input: CreateWorksheetInput) {
 
 export async function getWorksheetItems(worksheetId: string) {
   ensureSeed();
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const { data, error } = await supabase
       .from("worksheet_items")
       .select("*")
@@ -95,7 +95,7 @@ export async function getWorksheetItems(worksheetId: string) {
 
 export async function addWorksheetItems(rows: CreateWorksheetItemInput[]) {
   if (!rows.length) return [] as WorksheetItem[];
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const { data, error } = await supabase.from("worksheet_items").insert(rows).select("*");
     if (error) throw error;
     return (data ?? []) as WorksheetItem[];
@@ -118,7 +118,7 @@ export async function addWorksheetWithItems(input: CreateWorksheetInput, items: 
 }
 
 export async function deleteWorksheet(worksheetId: string) {
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const { error } = await supabase.from("worksheets").delete().eq("id", worksheetId);
     if (error) throw error;
     return;
@@ -126,3 +126,4 @@ export async function deleteWorksheet(worksheetId: string) {
   writeLocal(DB.worksheets, readLocal<Worksheet>(DB.worksheets).filter((row) => row.id !== worksheetId));
   writeLocal(DB.worksheetItems, readLocal<WorksheetItem>(DB.worksheetItems).filter((row) => row.worksheet_id !== worksheetId));
 }
+

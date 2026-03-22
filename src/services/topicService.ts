@@ -1,4 +1,4 @@
-import { hasSupabase, supabase } from "@/services/supabase";
+import { canUseSupabase, supabase } from "@/services/supabase";
 import type { TopicEntity, Question } from "@/types/domain";
 import { DB, ensureSeed, normalizeText, readLocal, writeLocal } from "./baseService";
 
@@ -7,8 +7,8 @@ export async function getTopics(chapterIds: string[]) {
   if (!chapterIds.length) {
     return [] as TopicEntity[];
   }
-  if (hasSupabase && supabase) {
-    const { data, error } = await supabase
+  if (canUseSupabase()) {
+    const { data, error } = await supabase!
       .from("topics")
       .select("*")
       .in("chapter_id", chapterIds)
@@ -29,7 +29,7 @@ export async function addTopic(input: Omit<TopicEntity, "id" | "created_at">) {
     throw new Error("Topic title is required");
   }
 
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const existing = await getTopics([input.chapter_id]);
     const titleExists = existing.some((row) => normalizeText(row.title) === normalizeText(nextTitle));
     if (titleExists) {
@@ -39,7 +39,7 @@ export async function addTopic(input: Omit<TopicEntity, "id" | "created_at">) {
     if (numberExists) {
       throw new Error("Topic number already exists");
     }
-    const { data, error } = await supabase
+    const { data, error } = await supabase!
       .from("topics")
       .insert({ ...input, title: nextTitle })
       .select("*")
@@ -77,8 +77,8 @@ export async function updateTopic(topicId: string, input: Pick<TopicEntity, "tit
     throw new Error("Topic title is required");
   }
 
-  if (hasSupabase && supabase) {
-    const { data: currentTopic, error: currentError } = await supabase
+  if (canUseSupabase()) {
+    const { data: currentTopic, error: currentError } = await supabase!
       .from("topics")
       .select("*")
       .eq("id", topicId)
@@ -96,7 +96,7 @@ export async function updateTopic(topicId: string, input: Pick<TopicEntity, "tit
     if (numberExists) {
       throw new Error("Topic number already exists");
     }
-    const { data, error } = await supabase
+    const { data, error } = await supabase!
       .from("topics")
       .update({ title: nextTitle, topic_number: input.topic_number })
       .eq("id", topicId)
@@ -130,12 +130,12 @@ export async function updateTopic(topicId: string, input: Pick<TopicEntity, "tit
 }
 
 export async function deleteTopic(topicId: string) {
-  if (hasSupabase && supabase) {
-    const { error } = await supabase.from("topics").delete().eq("id", topicId);
+  if (canUseSupabase()) {
+    const { error } = await supabase!.from("topics").delete().eq("id", topicId);
     if (error) {
       throw error;
     }
-    await supabase.from("questions").update({ topic_id: null }).eq("topic_id", topicId);
+    await supabase!.from("questions").update({ topic_id: null }).eq("topic_id", topicId);
     return;
   }
 
@@ -145,4 +145,6 @@ export async function deleteTopic(topicId: string) {
   );
   writeLocal(DB.questions, patchedQuestions);
 }
+
+
 

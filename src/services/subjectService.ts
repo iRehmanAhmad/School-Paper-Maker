@@ -1,11 +1,16 @@
-import { hasSupabase, supabase } from "@/services/supabase";
+import { canUseSupabase, supabase } from "@/services/supabase";
 import type { SubjectEntity, ChapterEntity, Question, ChapterWeightage, PaperQuestion, QuestionUsage, TopicEntity } from "@/types/domain";
 import { DB, ensureSeed, readLocal, writeLocal, assertUniqueName, DeleteImpact } from "./baseService";
 
+function isDuplicateError(error: unknown) {
+    const text = `${(error as any)?.message || ""}`.toLowerCase();
+    return text.includes("duplicate") || text.includes("unique");
+}
+
 export async function getSubjects(classIds: string[]) {
     ensureSeed();
-    if (hasSupabase && supabase) {
-        const { data, error } = await supabase.from("subjects").select("*").in("class_id", classIds);
+    if (canUseSupabase()) {
+        const { data, error } = await supabase!.from("subjects").select("*").in("class_id", classIds);
         if (error) {
             throw error;
         }
@@ -19,11 +24,12 @@ export async function addSubject(input: Omit<SubjectEntity, "id" | "created_at">
     if (!nextName) {
         throw new Error("Subject name is required");
     }
-    if (hasSupabase && supabase) {
-        const existing = await getSubjects([input.class_id]);
-        assertUniqueName(existing.map((r) => r.name), nextName, "Subject");
-        const { data, error } = await supabase.from("subjects").insert({ ...input, name: nextName }).select("*").single();
+    if (canUseSupabase()) {
+        const { data, error } = await supabase!.from("subjects").insert({ ...input, name: nextName }).select("*").single();
         if (error) {
+            if (isDuplicateError(error)) {
+                throw new Error("Subject already exists for this class");
+            }
             throw error;
         }
         return data as SubjectEntity;
@@ -43,8 +49,8 @@ export async function updateSubjectName(subjectId: string, name: string) {
     if (!nextName) {
         throw new Error("Subject name is required");
     }
-    if (hasSupabase && supabase) {
-        const { data: currentRow, error: currentError } = await supabase.from("subjects").select("*").eq("id", subjectId).single();
+    if (canUseSupabase()) {
+        const { data: currentRow, error: currentError } = await supabase!.from("subjects").select("*").eq("id", subjectId).single();
         if (currentError) {
             throw currentError;
         }
@@ -55,7 +61,7 @@ export async function updateSubjectName(subjectId: string, name: string) {
             nextName,
             "Subject",
         );
-        const { data, error } = await supabase.from("subjects").update({ name: nextName }).eq("id", subjectId).select("*").single();
+        const { data, error } = await supabase!.from("subjects").update({ name: nextName }).eq("id", subjectId).select("*").single();
         if (error) {
             throw error;
         }
@@ -77,8 +83,8 @@ export async function updateSubjectName(subjectId: string, name: string) {
 }
 
 export async function deleteSubject(subjectId: string) {
-    if (hasSupabase && supabase) {
-        const { error } = await supabase.from("subjects").delete().eq("id", subjectId);
+    if (canUseSupabase()) {
+        const { error } = await supabase!.from("subjects").delete().eq("id", subjectId);
         if (error) {
             throw error;
         }
@@ -97,8 +103,8 @@ export async function deleteSubject(subjectId: string) {
 }
 
 export async function getSubjectDeleteImpact(subjectId: string): Promise<DeleteImpact> {
-    if (hasSupabase && supabase) {
-        const { data: chapters, error: chapterError } = await supabase.from("chapters").select("id").eq("subject_id", subjectId);
+    if (canUseSupabase()) {
+        const { data: chapters, error: chapterError } = await supabase!.from("chapters").select("id").eq("subject_id", subjectId);
         if (chapterError) {
             throw chapterError;
         }
@@ -106,7 +112,7 @@ export async function getSubjectDeleteImpact(subjectId: string): Promise<DeleteI
         if (!chapterIds.length) {
             return { classes: 0, subjects: 1, chapters: 0, questions: 0 };
         }
-        const { data: questions, error: questionError } = await supabase.from("questions").select("id").in("chapter_id", chapterIds);
+        const { data: questions, error: questionError } = await supabase!.from("questions").select("id").in("chapter_id", chapterIds);
         if (questionError) {
             throw questionError;
         }

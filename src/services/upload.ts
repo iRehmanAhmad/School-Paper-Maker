@@ -81,3 +81,4 @@ export async function parseExcel(file: File): Promise<ImportedQuestionRow[]> {
   const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[first], { defval: "" });
   return rows.map(mapRawRow).filter(Boolean) as ImportedQuestionRow[];
 }
+

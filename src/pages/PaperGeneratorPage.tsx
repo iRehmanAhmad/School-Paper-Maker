@@ -1110,7 +1110,7 @@ export function PaperGeneratorPage() {
                 <button onClick={() => setStep(2)} className="rounded-2xl px-6 py-3 font-bold text-slate-400 hover:bg-slate-200 transition-all text-xs uppercase tracking-widest">Back</button>
                 <div className="flex flex-col items-end gap-2">
                   <button
-                    disabled={!isSubscriptionActive || isGenerating || composition.some(r => r.selected && r.count > (availableCounts[r.type] || 0))}
+                    disabled={!isSubscriptionActive || isGenerating || compositionOutdated || composition.some(r => r.selected && r.count > (availableCounts[r.type] || 0))}
                     onClick={async () => {
                       const success = await generate();
                       if (success) setStep(4);
@@ -1119,6 +1119,11 @@ export function PaperGeneratorPage() {
                   >
                     {isGenerating ? "Generating..." : "Generate & Preview"} <span className="text-xl">✨</span>
                   </button>
+                  {compositionOutdated && (
+                    <span className="text-[10px] font-black text-amber-700 uppercase tracking-widest px-2 relative -top-1">
+                      Syllabus changed. Recalculate composition above.
+                    </span>
+                  )}
                   {composition.some(r => r.selected && r.count > (availableCounts[r.type] || 0)) && (
                     <span className="text-[10px] font-black text-rose-500 uppercase tracking-widest px-2 relative -top-1">
                       ⚠️ Selected qty exceeds available pool
@@ -1191,6 +1196,20 @@ export function PaperGeneratorPage() {
                         </option>
                       ))}
                     </select>
+                  )}
+                  {generated && generated.sets.length > 1 && (
+                    <button
+                      onClick={() => {
+                        const mergedSettings = {
+                          ...(generated!.paper.settings_json as any),
+                          header: { ...(generated!.paper.settings_json as any).header, ...header },
+                        } as any;
+                        openPrintableHtmlAllSets(generated!.sets as any, mergedSettings);
+                      }}
+                      className="px-4 py-2 rounded-lg bg-amber-50 text-amber-700 hover:bg-amber-100 font-bold uppercase text-[10px] tracking-wide transition-all shadow-sm border border-amber-200"
+                    >
+                      Print All Sets
+                    </button>
                   )}
                   <button onClick={() => activeSet && downloadAnswerPdf(activeSet, { ...generated!.paper.settings_json, header: { ...(generated!.paper.settings_json as any).header, ...header } } as any)} className="px-4 py-2 rounded-lg bg-white border border-slate-200 hover:border-brand hover:text-brand font-bold uppercase text-[10px] tracking-wide text-slate-600 transition-all shadow-sm">
                     Answer Key

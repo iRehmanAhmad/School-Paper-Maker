@@ -41,3 +41,4 @@ export function getAppSettings(): AppSettings {
 export function saveAppSettings(settings: AppSettings) {
     localStorage.setItem("app_global_settings", JSON.stringify(settings));
 }
+

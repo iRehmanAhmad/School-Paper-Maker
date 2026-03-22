@@ -17,6 +17,7 @@ import {
 import { ConfirmModal } from "@/components/ConfirmModal";
 import { ContextBreadcrumbs } from "@/components/ContextBreadcrumbs";
 import { EmptyState } from "@/components/EmptyState";
+import { GhostAutocompleteInput } from "@/components/GhostAutocompleteInput";
 import { useHierarchyScopeParams } from "@/hooks/useHierarchyScopeParams";
 import { useUndoDeleteQueue } from "@/hooks/useUndoDeleteQueue";
 import { generateSyllabus } from "@/services/ai";
@@ -146,6 +147,12 @@ export function ChaptersPage() {
   const [topicEditNumber, setTopicEditNumber] = useState(1);
   const [topicDeleteTarget, setTopicDeleteTarget] = useState<{ id: string; title: string; countSnapshot: number } | null>(null);
   const [isDeletingTopic, setIsDeletingTopic] = useState(false);
+
+  const mergeTopics = (prev: TopicEntity[], incoming: TopicEntity[]) => {
+    const map = new Map<string, TopicEntity>();
+    [...prev, ...incoming].forEach((t) => map.set(t.id, t));
+    return Array.from(map.values()).sort((a, b) => a.topic_number - b.topic_number);
+  };
   const searchValue = search.trim().toLowerCase();
   const searchActive = !!searchValue;
 
@@ -206,7 +213,7 @@ export function ChaptersPage() {
     getTopics(orderedRows.map((row) => row.id))
       .then((rows) => {
         if (!ignore) {
-          setTopics(rows.sort((a, b) => a.topic_number - b.topic_number));
+          setTopics(mergeTopics([], rows));
         }
       })
       .catch(() => {
@@ -401,7 +408,7 @@ export function ChaptersPage() {
       );
       const validTopics = defaultTopics.filter((topic): topic is TopicEntity => !!topic);
       if (validTopics.length) {
-        setTopics((prev) => [...prev, ...validTopics].sort((a, b) => a.topic_number - b.topic_number));
+        setTopics((prev) => mergeTopics(prev, validTopics));
       }
       toast("success", `Added ${payload.length} chapters`);
       setShowAiSyllabus(false);
@@ -431,7 +438,7 @@ export function ChaptersPage() {
           })
         )
       );
-      setTopics((prev) => [...prev, ...newTopics].sort((a, b) => a.topic_number - b.topic_number));
+      setTopics((prev) => mergeTopics(prev, newTopics));
       setSelectedChapterForTopics(inserted.id);
       setTitle("");
       setChapterTopicsInput("");
@@ -510,7 +517,7 @@ export function ChaptersPage() {
         title: topicTitle.trim(),
         topic_number: topicNumber,
       });
-      setTopics((prev) => [...prev, inserted].sort((a, b) => a.topic_number - b.topic_number));
+      setTopics((prev) => mergeTopics(prev, [inserted]));
       setTopicTitle("");
       setTopicNumber((n) => n + 1);
       toast("success", "Topic added");
@@ -523,7 +530,7 @@ export function ChaptersPage() {
     if (!topicEditId) return;
     try {
       const updated = await updateTopic(topicEditId, { title: topicEditTitle, topic_number: topicEditNumber });
-      setTopics((prev) => prev.map((topic) => (topic.id === topicEditId ? updated : topic)).sort((a, b) => a.topic_number - b.topic_number));
+      setTopics((prev) => mergeTopics([], prev.map((topic) => (topic.id === topicEditId ? updated : topic))));
       setTopicEditId(null);
       toast("success", "Topic updated");
     } catch (error) {
@@ -557,7 +564,7 @@ export function ChaptersPage() {
       label: "Topic",
       commit: () => deleteTopic(topicDeleteTarget.id),
       rollback: () => {
-        setTopics((prev) => [...prev, snapshot].sort((a, b) => a.topic_number - b.topic_number));
+        setTopics((prev) => mergeTopics(prev, [snapshot]));
         setTopicCountById((prev) => ({ ...prev, [snapshot.id]: topicDeleteTarget.countSnapshot }));
       },
       successMessage: "Topic deleted",
@@ -659,12 +666,12 @@ export function ChaptersPage() {
           </select>
         </label>
         <label className="text-xs font-semibold text-slate-600">Chapter Title
-          <input
-            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
+          <GhostAutocompleteInput
+            className="mt-1"
             value={title}
-            onChange={(e) => setTitle(e.target.value)}
+            onChange={setTitle}
+            suggestion={findSuggestion(title, chapterSuggestions)}
             onKeyDown={onChapterTitleKeyDown}
-            autoComplete="off"
             placeholder="Chapter title (type then Tab to autocomplete)"
           />
         </label>
@@ -873,12 +880,12 @@ export function ChaptersPage() {
                                 <form onSubmit={submitTopic} className="grid gap-2 md:grid-cols-[1fr_140px_auto]">
                                   <label className="text-xs font-semibold text-slate-600">
                                     Topic Title
-                                    <input
-                                      className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
+                                    <GhostAutocompleteInput
+                                      className="mt-1"
                                       value={topicTitle}
-                                      onChange={(e) => setTopicTitle(e.target.value)}
+                                      onChange={setTopicTitle}
+                                      suggestion={findSuggestion(topicTitle, topicSuggestions)}
                                       onKeyDown={onTopicTitleKeyDown}
-                                      autoComplete="off"
                                       placeholder="Type topic title (Tab to autocomplete)"
                                     />
                                   </label>

@@ -161,11 +161,9 @@ as $$
   select school_id from users where id = auth.uid()
 $$;
 
-create policy "users can read own profile" on users
-for select using (id = auth.uid());
 
 create policy "school data read" on schools for select using (id = public.current_school_id());
-
+\n
 create policy "classes scoped" on classes for all using (school_id = public.current_school_id()) with check (school_id = public.current_school_id());
 create policy "exam bodies scoped" on exam_bodies for all using (school_id = public.current_school_id()) with check (school_id = public.current_school_id());
 
@@ -438,3 +436,5 @@ for all using (
 ) with check (
   lesson_plan_id in (select id from lesson_plans where school_id = public.current_school_id())
 );
+
+

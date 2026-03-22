@@ -1,4 +1,4 @@
-import { hasSupabase, supabase } from "./supabase";
+import { canUseSupabase, supabase } from "./supabase";
 import type { Question } from "@/types/domain";
 
 export interface BulkUpdatePayload {
@@ -20,7 +20,7 @@ export async function bulkUpdateQuestions(
     return { success: 0, failed: 0 };
   }
 
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     try {
       const { error, count } = await supabase
         .from("questions")
@@ -76,7 +76,7 @@ export async function bulkDeleteQuestions(
     return { success: 0, failed: 0 };
   }
 
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     try {
       const { error, count } = await supabase
         .from("questions")
@@ -145,7 +145,7 @@ export async function bulkDuplicateQuestions(
     };
   });
 
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     try {
       const { error, data } = await supabase
         .from("questions")
@@ -238,3 +238,4 @@ export function downloadCSV(content: string, filename: string) {
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
 }
+

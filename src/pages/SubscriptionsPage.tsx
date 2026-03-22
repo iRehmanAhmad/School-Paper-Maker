@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   addSchool,
   addUserProfile,
+  updateUserSchool,
   createPendingPaymentSubscription,
   getAuditLogs,
   getPaymentIntents,
@@ -68,6 +69,19 @@ function formatDate(value?: string | null) {
   return date.toLocaleDateString();
 }
 
+function formatPkr(amount?: number | null) {
+  if (amount === null || amount === undefined) return "-";
+  const safe = Number(amount);
+  if (Number.isNaN(safe)) return "-";
+  return `PKR ${safe.toFixed(0)}`;
+}
+
+function addMonths(date: Date, months: number) {
+  const next = new Date(date);
+  next.setMonth(next.getMonth() + months);
+  return next;
+}
+
 const statusClassMap: Record<SubscriptionStatus, string> = {
   pending_payment: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
   active: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
@@ -81,6 +95,7 @@ export function SubscriptionsPage() {
   const toast = useAppStore((s) => s.pushToast);
 
   const [rows, setRows] = useState<SchoolRow[]>([]);
+  const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
   const [plans, setPlans] = useState<SubscriptionPlan[]>([]);
   const [selectedSchoolId, setSelectedSchoolId] = useState("");
   const [paymentIntents, setPaymentIntents] = useState<PaymentIntent[]>([]);
@@ -110,13 +125,33 @@ export function SubscriptionsPage() {
   const [newEndsAt, setNewEndsAt] = useState(oneMonthWindow().end);
   const [createdLoginHint, setCreatedLoginHint] = useState("");
   const [schoolSearch, setSchoolSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<SubscriptionStatus | "all">("all");
+  const [planFilter, setPlanFilter] = useState("all");
+  const [pageSize, setPageSize] = useState(10);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [selectedSchoolIds, setSelectedSchoolIds] = useState<string[]>([]);
+  const [assignUserId, setAssignUserId] = useState("");
 
   const selectedRow = useMemo(() => rows.find((row) => row.school.id === selectedSchoolId) || null, [rows, selectedSchoolId]);
+  const lastPayment = useMemo(() => (paymentIntents.length ? paymentIntents[0] : null), [paymentIntents]);
   const filteredRows = useMemo(() => {
     const query = schoolSearch.trim().toLowerCase();
-    if (!query) return rows;
-    return rows.filter((row) => row.school.name.toLowerCase().includes(query));
-  }, [rows, schoolSearch]);
+    return rows.filter((row) => {
+      const matchesQuery = !query || row.school.name.toLowerCase().includes(query);
+      const matchesStatus = statusFilter === "all" || row.summary.status === statusFilter;
+      const matchesPlan = planFilter === "all" || row.summary.plan.code === planFilter;
+      return matchesQuery && matchesStatus && matchesPlan;
+    });
+  }, [rows, schoolSearch, statusFilter, planFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+  const paginatedRows = useMemo(() => {
+    const start = (currentPage - 1) * pageSize;
+    return filteredRows.slice(start, start + pageSize);
+  }, [filteredRows, currentPage, pageSize]);
+  const visibleRowIds = useMemo(() => paginatedRows.map((row) => row.school.id), [paginatedRows]);
+  const allVisibleSelected = visibleRowIds.length > 0 && visibleRowIds.every((id) => selectedSchoolIds.includes(id));
+  const selectedVisibleCount = visibleRowIds.filter((id) => selectedSchoolIds.includes(id)).length;
 
   const totals = useMemo(() => {
     let active = 0;
@@ -134,10 +169,26 @@ export function SubscriptionsPage() {
     return { totalSchools: rows.length, active, pending, suspended, basic, advanced };
   }, [rows]);
 
+  const unassignedUsers = useMemo(() => allUsers.filter((u) => !u.school_id), [allUsers]);
+
   useEffect(() => {
     void loadPageData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [schoolSearch, statusFilter, planFilter, pageSize]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
+  useEffect(() => {
+    setSelectedSchoolIds((prev) => prev.filter((id) => rows.some((row) => row.school.id === id)));
+  }, [rows]);
 
   useEffect(() => {
     if (!selectedSchoolId) {
@@ -170,16 +221,17 @@ export function SubscriptionsPage() {
   async function loadPageData(targetSchoolId?: string) {
     setLoading(true);
     try {
-      const [schoolRows, allUsers, planRows] = await Promise.all([getSchools(), getUsers(), getSubscriptionPlans()]);
+      const [schoolRows, usersRows, planRows] = await Promise.all([getSchools(), getUsers(), getSubscriptionPlans()]);
       const mapped: SchoolRow[] = await Promise.all(
         schoolRows.map(async (school) => {
           const summary = await getSubscriptionSummary(school.id);
-          const users = allUsers.filter((row) => row.school_id === school.id);
+          const users = usersRows.filter((row) => row.school_id === school.id);
           return { school: { id: school.id, name: school.name }, summary, users };
         }),
       );
       mapped.sort((a, b) => a.school.name.localeCompare(b.school.name));
       setRows(mapped);
+      setAllUsers(usersRows);
       setPlans(planRows);
       setSelectedSchoolId((current) => {
         if (targetSchoolId && mapped.some((row) => row.school.id === targetSchoolId)) return targetSchoolId;
@@ -262,6 +314,159 @@ export function SubscriptionsPage() {
     URL.revokeObjectURL(url);
   }
 
+  function toggleSchoolSelection(schoolId: string, checked?: boolean) {
+    setSelectedSchoolIds((prev) => {
+      const hasId = prev.includes(schoolId);
+      if (checked === undefined) {
+        return hasId ? prev.filter((id) => id !== schoolId) : [...prev, schoolId];
+      }
+      if (checked && !hasId) return [...prev, schoolId];
+      if (!checked && hasId) return prev.filter((id) => id !== schoolId);
+      return prev;
+    });
+  }
+
+  function toggleSelectAllVisible(checked: boolean) {
+    setSelectedSchoolIds((prev) => {
+      if (checked) {
+        return Array.from(new Set([...prev, ...visibleRowIds]));
+      }
+      return prev.filter((id) => !visibleRowIds.includes(id));
+    });
+  }
+
+  function clearSelectedSchools() {
+    setSelectedSchoolIds([]);
+  }
+
+  async function runBulkAction(label: string, handler: (row: SchoolRow) => Promise<void>) {
+    if (!selectedSchoolIds.length) return;
+    const selectedRows = rows.filter((row) => selectedSchoolIds.includes(row.school.id));
+    if (!selectedRows.length) return;
+    setBusy(true);
+    try {
+      for (const row of selectedRows) {
+        await handler(row);
+      }
+      toast("success", `${label} for ${selectedRows.length} school${selectedRows.length === 1 ? "" : "s"}`);
+      await loadPageData(selectedSchoolId || selectedRows[0]?.school.id);
+    } catch (error) {
+      toast("error", error instanceof Error ? error.message : "Bulk action failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function assignUserToSchool() {
+    if (!selectedRow) {
+      toast("error", "Select a school first");
+      return;
+    }
+    if (!assignUserId) {
+      toast("error", "Select a user to assign");
+      return;
+    }
+    setBusy(true);
+    try {
+      await updateUserSchool(assignUserId, selectedRow.school.id);
+      await logAuditEvent({
+        schoolId: selectedRow.school.id,
+        action: "user_assigned_to_school",
+        targetType: "user",
+        targetId: assignUserId,
+        details: { school_id: selectedRow.school.id },
+      });
+      setAssignUserId("");
+      await loadPageData(selectedRow.school.id);
+      toast("success", "User assigned to school");
+    } catch (error) {
+      toast("error", error instanceof Error ? error.message : "Failed to assign user");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function bulkActivate(planCode: "basic" | "advanced") {
+    const plan = plans.find((row) => row.code === planCode);
+    if (!plan) {
+      toast("error", "Plan not found");
+      return;
+    }
+    const window = oneMonthWindow();
+    await runBulkAction(`${plan.name} activated`, async (row) => {
+      await markManualPaymentAndActivate({
+        school_id: row.school.id,
+        plan_id: plan.id,
+        starts_at: fromDateInput(window.start),
+        ends_at: fromDateInput(window.end),
+        amount_pkr: planCode === "advanced" ? 4500 : 2500,
+        provider: "manual",
+        transaction_id: `ADMIN-BULK-${Date.now()}`,
+        created_by: profile?.id || null,
+      });
+      await writeAudit({
+        schoolId: row.school.id,
+        action: "subscription_activated",
+        targetType: "plan",
+        targetId: plan.id,
+        details: {
+          plan: plan.code,
+          duration: "1_month",
+          mode: "manual_bulk_action",
+        },
+      });
+    });
+  }
+
+  async function bulkSuspend() {
+    await runBulkAction("Suspended", async (row) => {
+      const subscription = row.summary.subscription;
+      const nowIso = new Date().toISOString();
+      await upsertSchoolSubscription({
+        school_id: row.school.id,
+        plan_id: subscription?.plan_id || row.summary.plan.id,
+        status: "suspended",
+        starts_at: subscription?.starts_at || nowIso,
+        ends_at: subscription?.ends_at || fromDateInput(todayDateInput()),
+        payment_method: subscription?.payment_method || "manual",
+        transaction_id: subscription?.transaction_id || null,
+        paid_at: subscription?.paid_at || null,
+        created_by: profile?.id || null,
+      });
+      await writeAudit({
+        schoolId: row.school.id,
+        action: "subscription_suspended",
+        targetType: "subscription",
+        targetId: subscription?.id || row.school.id,
+        details: { previous_status: row.summary.status },
+      });
+    });
+  }
+
+  async function bulkCancelNow() {
+    await runBulkAction("Cancelled", async (row) => {
+      const subscription = row.summary.subscription;
+      const nowIso = new Date().toISOString();
+      await upsertSchoolSubscription({
+        school_id: row.school.id,
+        plan_id: subscription?.plan_id || row.summary.plan.id,
+        status: "cancelled",
+        starts_at: subscription?.starts_at || nowIso,
+        ends_at: fromDateInput(todayDateInput()),
+        payment_method: subscription?.payment_method || "manual",
+        transaction_id: subscription?.transaction_id || null,
+        paid_at: subscription?.paid_at || null,
+        created_by: profile?.id || null,
+      });
+      await writeAudit({
+        schoolId: row.school.id,
+        action: "subscription_cancelled_now",
+        targetType: "subscription",
+        targetId: subscription?.id || row.school.id,
+        details: { previous_status: row.summary.status, cancelled_at: nowIso },
+      });
+    });
+  }
   async function submitUpdateSubscription(event: FormEvent) {
     event.preventDefault();
     if (!selectedRow) return;
@@ -388,6 +593,44 @@ export function SubscriptionsPage() {
     }
   }
 
+  async function extendSelectedOneMonth() {
+    if (!selectedRow) return;
+    const subscription = selectedRow.summary.subscription;
+    const baseEnd = subscription?.ends_at ? new Date(subscription.ends_at) : new Date();
+    const safeBase = Number.isNaN(baseEnd.getTime()) ? new Date() : baseEnd;
+    const newEnd = addMonths(safeBase, 1);
+    const status = selectedRow.summary.status;
+    setBusy(true);
+    try {
+      await upsertSchoolSubscription({
+        school_id: selectedRow.school.id,
+        plan_id: subscription?.plan_id || selectedRow.summary.plan.id,
+        status,
+        starts_at: subscription?.starts_at || new Date().toISOString(),
+        ends_at: newEnd.toISOString(),
+        payment_method: subscription?.payment_method || "manual",
+        transaction_id: subscription?.transaction_id || null,
+        paid_at: status === "active" ? new Date().toISOString() : null,
+        created_by: profile?.id || null,
+      });
+      await writeAudit({
+        schoolId: selectedRow.school.id,
+        action: "subscription_extended",
+        targetType: "subscription",
+        targetId: subscription?.id || selectedRow.school.id,
+        details: { new_end: newEnd.toISOString(), previous_end: subscription?.ends_at || null },
+      });
+      toast("success", "Subscription extended by 1 month");
+      await loadPageData(selectedRow.school.id);
+      await loadPaymentIntents(selectedRow.school.id);
+      await loadAuditLogs(selectedRow.school.id);
+    } catch (error) {
+      toast("error", error instanceof Error ? error.message : "Failed to extend subscription");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function submitCreateClient(event: FormEvent) {
     event.preventDefault();
     if (!newSchoolName.trim() || !newUserName.trim() || !newUserEmail.trim() || !newUserPassword.trim() || !newPlanId) {
@@ -467,6 +710,7 @@ export function SubscriptionsPage() {
       setNewTxnId("");
       setNewPhone("");
       setNewNotes("");
+      setSelectedSchoolId(school.id);
       await loadPageData(school.id);
       await loadPaymentIntents(school.id);
       await loadAuditLogs(school.id);
@@ -543,6 +787,78 @@ export function SubscriptionsPage() {
               placeholder="Type school name..."
             />
           </label>
+          <div className="mt-3 grid gap-3 sm:grid-cols-3">
+            <label className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+              Filter Status
+              <select
+                className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900"
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value as SubscriptionStatus | "all")}
+              >
+                <option value="all">All Statuses</option>
+                <option value="active">active</option>
+                <option value="pending_payment">pending_payment</option>
+                <option value="suspended">suspended</option>
+                <option value="cancelled">cancelled</option>
+                <option value="expired">expired</option>
+              </select>
+            </label>
+            <label className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+              Filter Plan
+              <select
+                className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900"
+                value={planFilter}
+                onChange={(e) => setPlanFilter(e.target.value)}
+              >
+                <option value="all">All Plans</option>
+                {plans.map((plan) => (
+                  <option key={plan.id} value={plan.code}>
+                    {plan.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="text-xs font-semibold text-slate-600 dark:text-slate-300">
+              Rows Per Page
+              <select
+                className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900"
+                value={pageSize}
+                onChange={(e) => setPageSize(Number(e.target.value) || 10)}
+              >
+                {[5, 10, 20, 50].map((size) => (
+                  <option key={size} value={size}>
+                    {size}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          {selectedSchoolIds.length > 0 && (
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white/70 px-3 py-2 text-xs dark:border-slate-800 dark:bg-slate-900/40">
+              <span className="font-semibold text-slate-600 dark:text-slate-300">
+                Selected {selectedSchoolIds.length} school{selectedSchoolIds.length === 1 ? "" : "s"} ({selectedVisibleCount} visible)
+              </span>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" disabled={busy} onClick={() => bulkActivate("basic")} className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1 font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-50">
+                  Activate Basic
+                </button>
+                <button type="button" disabled={busy} onClick={() => bulkActivate("advanced")} className="rounded-lg border border-brand/40 bg-brand/10 px-3 py-1 font-semibold text-brand hover:bg-brand/20 disabled:opacity-50">
+                  Activate Advanced
+                </button>
+                <button type="button" disabled={busy} onClick={bulkSuspend} className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-1 font-semibold text-amber-700 hover:bg-amber-100 disabled:opacity-50">
+                  Suspend
+                </button>
+                <button type="button" disabled={busy} onClick={bulkCancelNow} className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-1 font-semibold text-rose-700 hover:bg-rose-100 disabled:opacity-50">
+                  Cancel Now
+                </button>
+                <button type="button" onClick={clearSelectedSchools} className="rounded-lg border border-slate-200 px-3 py-1 font-semibold text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300">
+                  Clear
+                </button>
+              </div>
+            </div>
+          )}
+
           <div className="mt-3 overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
             {loading ? (
               <p className="p-3 text-sm text-slate-500 dark:text-slate-400">Loading schools...</p>
@@ -550,6 +866,9 @@ export function SubscriptionsPage() {
               <table className="w-full min-w-[560px] text-left text-sm">
                 <thead className="bg-slate-50 dark:bg-slate-900/40">
                   <tr className="border-b border-slate-200 text-[11px] uppercase text-slate-500 dark:border-slate-800 dark:text-slate-400">
+                    <th className="w-10 px-2 py-2">
+                      <input type="checkbox" checked={allVisibleSelected} onChange={(e) => toggleSelectAllVisible(e.target.checked)} aria-label="Select all visible" />
+                    </th>
                     <th className="px-2 py-2">School</th>
                     <th className="px-2 py-2">Plan</th>
                     <th className="px-2 py-2">Status</th>
@@ -558,7 +877,7 @@ export function SubscriptionsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredRows.map((row) => (
+                  {paginatedRows.map((row) => (
                     <tr
                       key={row.school.id}
                       onClick={() => setSelectedSchoolId(row.school.id)}
@@ -566,6 +885,15 @@ export function SubscriptionsPage() {
                         selectedSchoolId === row.school.id ? "bg-brand/10" : ""
                       }`}
                     >
+                      <td className="px-2 py-2">
+                        <input
+                          type="checkbox"
+                          checked={selectedSchoolIds.includes(row.school.id)}
+                          onChange={(e) => toggleSchoolSelection(row.school.id, e.target.checked)}
+                          onClick={(e) => e.stopPropagation()}
+                          aria-label={`Select ${row.school.name}`}
+                        />
+                      </td>
                       <td className="px-2 py-2 font-semibold text-ink">{row.school.name}</td>
                       <td className="px-2 py-2 text-slate-700 dark:text-slate-300">{row.summary.plan.name}</td>
                       <td className="px-2 py-2">
@@ -574,7 +902,20 @@ export function SubscriptionsPage() {
                         </span>
                       </td>
                       <td className="px-2 py-2 text-center text-slate-700 dark:text-slate-300">{row.users.length}</td>
-                      <td className="px-2 py-2 text-slate-700 dark:text-slate-300">{formatDate(row.summary.subscription?.ends_at)}</td>
+                      <td className="px-2 py-2 text-slate-700 dark:text-slate-300">
+                        <div>{formatDate(row.summary.subscription?.ends_at)}</div>
+                        {Number.isFinite(row.summary.daysRemaining) ? (
+                          <div
+                            className={`text-[11px] ${
+                              row.summary.status === "active" && row.summary.daysRemaining <= 7
+                                ? "font-semibold text-rose-600 dark:text-rose-300"
+                                : "text-slate-500 dark:text-slate-400"
+                            }`}
+                          >
+                            {row.summary.daysRemaining} days left
+                          </div>
+                        ) : null}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -583,6 +924,31 @@ export function SubscriptionsPage() {
               <p className="p-3 text-sm text-slate-500 dark:text-slate-400">No schools found.</p>
             )}
           </div>
+          {!loading && filteredRows.length > 0 && (
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
+              <span>
+                Page {currentPage} of {totalPages} - Showing {paginatedRows.length} of {filteredRows.length}
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={currentPage <= 1}
+                  onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                  className="rounded-lg border border-slate-200 px-3 py-1 font-semibold text-slate-600 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-800 dark:text-slate-300"
+                >
+                  Prev
+                </button>
+                <button
+                  type="button"
+                  disabled={currentPage >= totalPages}
+                  onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                  className="rounded-lg border border-slate-200 px-3 py-1 font-semibold text-slate-600 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-800 dark:text-slate-300"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="space-y-4">
@@ -602,12 +968,18 @@ export function SubscriptionsPage() {
                 </div>
                 <div className="mt-4 grid gap-3 sm:grid-cols-3">
                   <InfoCard label="Days Remaining" value={String(selectedRow.summary.daysRemaining)} />
+                  <InfoCard label="Start Date" value={formatDate(selectedRow.summary.subscription?.starts_at)} />
+                  <InfoCard label="End Date" value={formatDate(selectedRow.summary.subscription?.ends_at)} />
                   <InfoCard label="Paper Variations" value={`Up to ${selectedRow.summary.maxPaperSets}`} />
                   <InfoCard
                     label="Worksheet / Lesson Plan"
                     value={`${selectedRow.summary.canGenerateWorksheets ? "Enabled" : "Locked"} / ${
                       selectedRow.summary.canGenerateLessonPlans ? "Enabled" : "Locked"
                     }`}
+                  />
+                  <InfoCard
+                    label="Last Payment"
+                    value={lastPayment ? `${lastPayment.provider} - ${formatPkr(lastPayment.amount_pkr)}` : "No payments yet"}
                   />
                 </div>
               </div>
@@ -693,6 +1065,14 @@ export function SubscriptionsPage() {
                   </button>
                   <button
                     type="button"
+                    disabled={busy || selectedRow.summary.status === "cancelled" || selectedRow.summary.status === "suspended"}
+                    onClick={() => void extendSelectedOneMonth()}
+                    className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 dark:border-slate-700 dark:text-slate-200"
+                  >
+                    Extend +1 month
+                  </button>
+                  <button
+                    type="button"
                     disabled={busy}
                     onClick={() => void activateOneMonth("basic")}
                     className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 dark:border-slate-700 dark:text-slate-200"
@@ -715,6 +1095,36 @@ export function SubscriptionsPage() {
                   >
                     Cancel Now
                   </button>
+                </div>
+
+                <div className="mt-5 border-t border-slate-200 pt-4 dark:border-slate-800">
+                  <h4 className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Assign User</h4>
+                  <div className="mt-3 grid gap-3 md:grid-cols-[1fr_auto]">
+                    <label className="text-sm text-slate-700 dark:text-slate-300">
+                      Unassigned Users
+                      <select
+                        className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-900"
+                        value={assignUserId}
+                        onChange={(e) => setAssignUserId(e.target.value)}
+                        disabled={busy || unassignedUsers.length === 0}
+                      >
+                        <option value="">{unassignedUsers.length ? "Select a user" : "No unassigned users"}</option>
+                        {unassignedUsers.map((user) => (
+                          <option key={user.id} value={user.id}>
+                            {user.full_name} - {user.email}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={assignUserToSchool}
+                      disabled={busy || !assignUserId}
+                      className="h-10 self-end rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                    >
+                      Assign User
+                    </button>
+                  </div>
                 </div>
               </form>
 
@@ -1030,3 +1440,15 @@ function InfoCard({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
+
+
+
+
+
+
+
+
+
+
+
+

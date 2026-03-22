@@ -34,6 +34,7 @@ export const DB = {
   users: "pg_users",
   classes: "pg_classes",
   subjects: "pg_subjects",
+  subjectOutlines: "pg_subject_outlines",
   chapters: "pg_chapters",
   topics: "pg_topics",
   questions: "pg_questions",
@@ -60,7 +61,12 @@ export const DB = {
 
 export type Key = (typeof DB)[keyof typeof DB];
 
+export const requireSupabaseAuth = import.meta.env.PROD || import.meta.env.VITE_REQUIRE_SUPABASE_AUTH === "true";
+
 export function readLocal<T>(key: Key): T[] {
+  if (requireSupabaseAuth) {
+    return [];
+  }
   const raw = localStorage.getItem(key);
   if (!raw) {
     return [];
@@ -73,6 +79,9 @@ export function readLocal<T>(key: Key): T[] {
 }
 
 export function writeLocal<T>(key: Key, rows: T[]) {
+  if (requireSupabaseAuth) {
+    return;
+  }
   try {
     localStorage.setItem(key, JSON.stringify(rows));
   } catch (e: any) {
@@ -460,6 +469,9 @@ function ensureUserPasswords() {
 }
 
 export function ensureSeed() {
+  if (requireSupabaseAuth) {
+    return;
+  }
   const hasExisting = readLocal<School>(DB.schools).length > 0;
   const hasBodies = readLocal<ExamBody>(DB.examBodies).length > 0;
   if (hasExisting && hasBodies) {
@@ -514,6 +526,9 @@ export function ensureSeed() {
     }
     if (!readLocal<AuditLog>(DB.auditLogs).length) {
       writeLocal<AuditLog>(DB.auditLogs, []);
+    }
+    if (!readLocal(DB.subjectOutlines).length) {
+      writeLocal(DB.subjectOutlines, []);
     }
     ensureUserPasswords();
     ensureTopicStructure();
@@ -685,6 +700,7 @@ export function ensureSeed() {
   writeLocal(DB.templates, []);
   writeLocal<ContentSource>(DB.contentSources, []);
   writeLocal<ContentChunk>(DB.contentChunks, []);
+  writeLocal(DB.subjectOutlines, []);
   writeLocal<GenerationJob>(DB.generationJobs, []);
   writeLocal<GenerationCandidate>(DB.generationCandidates, []);
   writeLocal<Worksheet>(DB.worksheets, []);
@@ -697,3 +713,4 @@ export function ensureSeed() {
   ensureTopicStructure();
   ensureScienceChapter2DummyQuestions();
 }
+

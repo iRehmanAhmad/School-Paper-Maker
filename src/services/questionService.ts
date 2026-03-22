@@ -1,11 +1,11 @@
-import { hasSupabase, supabase } from "@/services/supabase";
+import { canUseSupabase, supabase } from "@/services/supabase";
 import type { Question, PaperQuestion, QuestionUsage } from "@/types/domain";
 import { DB, ensureSeed, readLocal, writeLocal } from "./baseService";
 
 export async function getQuestions(schoolId: string, chapterIds?: string[]) {
     ensureSeed();
-    if (hasSupabase && supabase) {
-        let query = supabase.from("questions").select("*").eq("school_id", schoolId).order("created_at", { ascending: false }).limit(5000);
+    if (canUseSupabase()) {
+        let query = supabase!.from("questions").select("*").eq("school_id", schoolId).order("created_at", { ascending: false }).limit(5000);
         if (chapterIds?.length) {
             query = query.in("chapter_id", chapterIds);
         }
@@ -20,8 +20,8 @@ export async function getQuestions(schoolId: string, chapterIds?: string[]) {
 }
 
 export async function addQuestions(rows: Omit<Question, "id" | "created_at">[]) {
-    if (hasSupabase && supabase) {
-        const { data, error } = await supabase.from("questions").insert(rows).select("*");
+    if (canUseSupabase()) {
+        const { data, error } = await supabase!.from("questions").insert(rows).select("*");
         if (error) {
             throw error;
         }
@@ -40,13 +40,13 @@ export async function getQuestionCountsByChapter(schoolId: string, chapterIds: s
         return {} as Record<string, number>;
     }
 
-    if (hasSupabase && supabase) {
+    if (canUseSupabase()) {
         const counts: Record<string, number> = {};
         const pageSize = 1000;
         let from = 0;
 
         while (true) {
-            const { data, error } = await supabase
+            const { data, error } = await supabase!
                 .from("questions")
                 .select("chapter_id")
                 .eq("school_id", schoolId)
@@ -83,13 +83,13 @@ export async function getQuestionCountsByTopic(schoolId: string, topicIds: strin
         return {} as Record<string, number>;
     }
 
-    if (hasSupabase && supabase) {
+    if (canUseSupabase()) {
         const counts: Record<string, number> = {};
         const pageSize = 1000;
         let from = 0;
 
         while (true) {
-            const { data, error } = await supabase
+            const { data, error } = await supabase!
                 .from("questions")
                 .select("topic_id")
                 .eq("school_id", schoolId)
@@ -122,8 +122,8 @@ export async function getQuestionCountsByTopic(schoolId: string, topicIds: strin
 }
 
 export async function updateQuestionById(questionId: string, patch: Partial<Omit<Question, "id" | "created_at">>) {
-    if (hasSupabase && supabase) {
-        const { data, error } = await supabase
+    if (canUseSupabase()) {
+        const { data, error } = await supabase!
             .from("questions")
             .update(patch)
             .eq("id", questionId)
@@ -149,8 +149,8 @@ export async function deleteQuestionsByIds(questionIds: string[]) {
     if (!questionIds.length) {
         return;
     }
-    if (hasSupabase && supabase) {
-        const { error } = await supabase.from("questions").delete().in("id", questionIds);
+    if (canUseSupabase()) {
+        const { error } = await supabase!.from("questions").delete().in("id", questionIds);
         if (error) {
             throw error;
         }

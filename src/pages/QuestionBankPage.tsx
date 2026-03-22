@@ -278,7 +278,7 @@ export function QuestionBankPage() {
   const visibleSubjects = useMemo(() => subjects.filter((s) => !classId || s.class_id === classId), [subjects, classId]);
   const visibleChapters = useMemo(() => chapters.filter((c) => !subjectId || c.subject_id === subjectId), [chapters, subjectId]);
   const visibleTopics = useMemo(() => topics.filter((t) => !chapterId || t.chapter_id === chapterId), [topics, chapterId]);
-
+  const topicTitleById = useMemo(() => new Map(topics.map((topic) => [topic.id, `${topic.topic_number}. ${topic.title}`])), [topics]);
   useEffect(() => {
     if (!chapters.length) {
       setTopics([]);
@@ -313,7 +313,7 @@ export function QuestionBankPage() {
   const selectedClassName = classes.find((c) => c.id === classId)?.name;
   const selectedSubjectName = subjects.find((s) => s.id === subjectId)?.name;
   const selectedChapterName = chapterId ? chapters.find((c) => c.id === chapterId)?.title : "All Chapters";
-  const selectedTopicName = topicId ? topics.find((t) => t.id === topicId)?.title : "";
+  const selectedTopicName = topicId ? topicTitleById.get(topicId) || "" : "";
   const activeContext = contextLocked && lockedContext ? lockedContext : { examBodyId, classId, subjectId, chapterId, topicId };
   const activeChapterId = activeContext.chapterId;
   const activeTopicId = activeContext.topicId || "";
@@ -324,7 +324,7 @@ export function QuestionBankPage() {
   const activeClassName = classes.find((c) => c.id === activeContext.classId)?.name || selectedClassName;
   const activeSubjectName = subjects.find((s) => s.id === activeContext.subjectId)?.name || selectedSubjectName;
   const activeChapterName = chapters.find((c) => c.id === activeChapterId)?.title || selectedChapterName;
-  const activeTopicName = topics.find((t) => t.id === activeTopicId)?.title || selectedTopicName || "All Topics";
+  const activeTopicName = topicTitleById.get(activeTopicId) || selectedTopicName || "All Topics";
 
   async function refreshApprovedContextCandidates() {
     if (!profile?.school_id || !activeChapterId) {
@@ -1496,6 +1496,7 @@ export function QuestionBankPage() {
                     </th>
                     <th className="w-36 px-3 py-3">Type</th>
                     <th className="px-3 py-3">Question</th>
+                    <th className="w-40 px-3 py-3">Topic</th>
                     <th className="w-40 px-3 py-3">Metadata</th>
                     <th className="w-48 px-3 py-3">Actions</th>
                   </tr>
@@ -1503,15 +1504,15 @@ export function QuestionBankPage() {
                 <tbody>
                   {loadingQuestions && (
                     <tr>
-                      <td colSpan={5} className="px-4 py-4">
-                        <LoadingTable rows={8} columns={5} />
+                      <td colSpan={6} className="px-4 py-4">
+                        <LoadingTable rows={8} columns={6} />
                       </td>
                     </tr>
                   )}
 
                   {!loadingQuestions && filteredQuestions.length === 0 && (
                     <tr>
-                      <td colSpan={5} className="px-4 py-4">
+                      <td colSpan={6} className="px-4 py-4">
                         <EmptyState title="No questions found" description="Try another filter or add new questions in this chapter." />
                       </td>
                     </tr>
@@ -1542,9 +1543,14 @@ export function QuestionBankPage() {
                               <p><span className="font-bold text-slate-700">Difficulty:</span> {q.difficulty}</p>
                               <p><span className="font-bold text-slate-700">Bloom:</span> {q.bloom_level || "--"}</p>
                               <p><span className="font-bold text-slate-700">Level:</span> {q.question_level}</p>
-                              <p><span className="font-bold text-slate-700">Topic:</span> {topics.find((t) => t.id === q.topic_id)?.title || "--"}</p>
+                              <p><span className="font-bold text-slate-700">Topic:</span> {topicTitleById.get(q.topic_id || "") || "--"}</p>
                             </div>
                           </div>
+                        </div>
+                      </td>
+                      <td className="px-3 py-3">
+                        <div className="text-xs font-semibold text-slate-600">
+                          {topicTitleById.get(q.topic_id || "") || "No topic"}
                         </div>
                       </td>
                       <td className="px-3 py-3">
@@ -1553,7 +1559,7 @@ export function QuestionBankPage() {
                             {q.difficulty}
                           </span>
                           <p className="text-[10px] font-semibold uppercase text-slate-500">{q.bloom_level || "no bloom"}</p>
-                          <p className="text-[10px] font-semibold text-slate-500">{topics.find((t) => t.id === q.topic_id)?.title || "No topic"}</p>
+                          <p className="text-[10px] font-semibold text-slate-500">{topicTitleById.get(q.topic_id || "") || "No topic"}</p>
                         </div>
                       </td>
                       <td className="px-3 py-3">

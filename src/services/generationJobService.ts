@@ -1,4 +1,4 @@
-import { hasSupabase, supabase } from "@/services/supabase";
+import { canUseSupabase, supabase } from "@/services/supabase";
 import type {
   ArtifactType,
   BloomLevel,
@@ -96,7 +96,7 @@ function toJsonObject(value: unknown) {
 
 export async function getGenerationJobs(schoolId: string, filters?: GenerationJobFilters) {
   ensureSeed();
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     let query = supabase
       .from("generation_jobs")
       .select("*")
@@ -121,7 +121,7 @@ export async function getGenerationJobs(schoolId: string, filters?: GenerationJo
 
 export async function queueGenerationJob(input: QueueGenerationJobInput) {
   await assertCanGenerateArtifact(input.school_id, input.artifact);
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const payload = {
       ...input,
       status: input.status || "queued",
@@ -160,7 +160,7 @@ export async function queueGenerationJob(input: QueueGenerationJobInput) {
 }
 
 export async function updateGenerationJob(jobId: string, patch: UpdateJobPatch) {
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const { data, error } = await supabase.from("generation_jobs").update(patch).eq("id", jobId).select("*").single();
     if (error) throw error;
     return data as GenerationJob;
@@ -175,7 +175,7 @@ export async function updateGenerationJob(jobId: string, patch: UpdateJobPatch) 
 
 export async function getGenerationCandidates(schoolId: string, filters?: CandidateFilters) {
   ensureSeed();
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     let query = supabase
       .from("generation_candidates")
       .select("*")
@@ -198,7 +198,7 @@ export async function getGenerationCandidates(schoolId: string, filters?: Candid
 
 export async function addGenerationCandidates(rows: CreateCandidateInput[]) {
   if (!rows.length) return [] as GenerationCandidate[];
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const payload = rows.map((row) => ({
       ...row,
       payload: toJsonObject(row.payload),
@@ -237,7 +237,7 @@ export async function reviewGenerationCandidate(candidateId: string, action: Rev
   const status: CandidateStatus = action === "approve" ? "approved" : "rejected";
   const approvedAt = action === "approve" ? new Date().toISOString() : null;
   const approvedBy = action === "approve" ? reviewerId : null;
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const { data, error } = await supabase
       .from("generation_candidates")
       .update({ status, approved_by: approvedBy, approved_at: approvedAt })
@@ -258,7 +258,7 @@ export async function reviewGenerationCandidate(candidateId: string, action: Rev
 }
 
 async function getCandidateById(candidateId: string) {
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const { data, error } = await supabase.from("generation_candidates").select("*").eq("id", candidateId).single();
     if (error) throw error;
     return data as GenerationCandidate;
@@ -269,7 +269,7 @@ async function getCandidateById(candidateId: string) {
 }
 
 async function getJobById(jobId: string) {
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const { data, error } = await supabase.from("generation_jobs").select("*").eq("id", jobId).single();
     if (error) throw error;
     return data as GenerationJob;
@@ -280,7 +280,7 @@ async function getJobById(jobId: string) {
 }
 
 async function markCandidatePublished(candidateId: string, tableName: string, publishedId: string) {
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const { data, error } = await supabase
       .from("generation_candidates")
       .update({
@@ -412,3 +412,4 @@ export async function publishGenerationCandidate(candidateId: string) {
   await markCandidatePublished(candidateId, "lesson_plans", result.plan.id);
   return { artifact: "lesson_plan" as ArtifactType, published_table: "lesson_plans", published_id: result.plan.id };
 }
+

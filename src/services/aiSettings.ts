@@ -1,35 +1,25 @@
-import { hasSupabase, supabase } from "@/services/supabase";
-
-export type AIProvider = "groq" | "openrouter" | "together" | "openai" | "gemini" | "supabase" | "deepseek" | "anthropic" | "qwen" | "siliconflow";
-
-export type AIKeyEntry = {
-  id: string;
-  provider: AIProvider;
-  key: string;
-  label?: string;
-  usageCount: number;
-  lastUsed?: string;
-  isExhausted?: boolean;
-  quotaRemaining?: string;
-};
-
-export type AISettings = {
-  provider: AIProvider;
-  model: string;
-  openaiApiKey: string;
-  groqApiKey: string;
-  openrouterApiKey: string;
-  togetherApiKey: string;
-  geminiApiKey: string;
-  deepseekApiKey: string;
-  anthropicApiKey: string;
-  qwenApiKey: string;
-  siliconflowApiKey: string;
-  keyPool: AIKeyEntry[];
-};
+import { canUseSupabase, supabase } from "@/services/supabase";
+import { type AIProvider, type AIKeyEntry, type AISettings } from "@/types/ai";
+import { useAppStore } from "@/store/useAppStore";
 
 const KEY = "pg_ai_settings";
+const AVAIL_KEY = "pg_ai_settings_avail";
 let schoolAISettingsTableAvailable: boolean | null = null;
+
+function getTableAvail() {
+  if (schoolAISettingsTableAvailable !== null) return schoolAISettingsTableAvailable;
+  const cached = localStorage.getItem(AVAIL_KEY);
+  if (cached === "false") {
+    schoolAISettingsTableAvailable = false;
+    return false;
+  }
+  return true;
+}
+
+function setTableAvail(avail: boolean) {
+  schoolAISettingsTableAvailable = avail;
+  localStorage.setItem(AVAIL_KEY, String(avail));
+}
 
 const defaults: AISettings = {
   provider: "groq",
@@ -44,6 +34,7 @@ const defaults: AISettings = {
   qwenApiKey: "",
   siliconflowApiKey: "",
   keyPool: [],
+  activeKeyId: "",
 };
 
 export function getAISettings(): AISettings {
@@ -66,11 +57,39 @@ export function getAISettings(): AISettings {
             label: "Primary Key",
             usageCount: 0,
             isExhausted: false,
+            model: settings.model || defaults.model,
           });
         }
       });
       // Save migrated state
       localStorage.setItem(KEY, JSON.stringify(settings));
+    }
+
+    // Migration: collapse multi-model keys to single model
+    if (settings.keyPool && settings.keyPool.length) {
+      let changed = false;
+      const providerCounts: Record<string, number> = {};
+      settings.keyPool = settings.keyPool.map((k) => {
+        const anyKey = k as unknown as { models?: string[]; model?: string };
+        if (!anyKey.model && Array.isArray(anyKey.models) && anyKey.models.length) {
+          changed = true;
+          k = { ...k, model: anyKey.models[0] };
+        }
+        if (!k.label || k.label === "Primary Key") {
+          providerCounts[k.provider] = (providerCounts[k.provider] || 0) + 1;
+          const stamp = new Date().toLocaleDateString() + " " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+          k = { ...k, label: `${k.provider} Key #${providerCounts[k.provider]} • ${stamp}` };
+          changed = true;
+        }
+        return k;
+      });
+      if (changed) {
+        localStorage.setItem(KEY, JSON.stringify(settings));
+      }
+    }
+
+    if (!settings.activeKeyId) {
+      settings.activeKeyId = "";
     }
 
     return settings;
@@ -85,11 +104,15 @@ export function updateKeyStatus(keyId: string, updates: Partial<AIKeyEntry>) {
   if (idx !== -1) {
     settings.keyPool[idx] = { ...settings.keyPool[idx], ...updates };
     saveAISettings(settings);
+    // Sync to store
+    useAppStore.getState().setAiSettings(settings);
   }
 }
 
 export function saveAISettings(input: AISettings) {
   localStorage.setItem(KEY, JSON.stringify(input));
+  // Sync to store
+  useAppStore.getState().setAiSettings(input);
 }
 
 type SchoolAISettingsRow = {
@@ -157,27 +180,26 @@ function fromRow(row: Partial<SchoolAISettingsRow>): AISettings {
     keyPool: [],
   };
 }
-
 export async function getSchoolAISettings(schoolId: string | null | undefined) {
-  if (!schoolId || !hasSupabase || !supabase) {
+  if (!schoolId || !canUseSupabase()) {
     return getAISettings();
   }
-  if (schoolAISettingsTableAvailable === false) {
+  if (!getTableAvail()) {
     return getAISettings();
   }
   try {
-    const { data, error } = await supabase
+    const { data, error } = await supabase!
       .from("school_ai_settings")
       .select("*")
       .eq("school_id", schoolId)
       .maybeSingle();
     if (error) {
       if (isMissingTableError(error)) {
-        schoolAISettingsTableAvailable = false;
+        setTableAvail(false);
       }
       throw error;
     }
-    schoolAISettingsTableAvailable = true;
+    setTableAvail(true);
     if (!data) {
       return getAISettings();
     }
@@ -195,14 +217,14 @@ export async function saveSchoolAISettings(
   updatedBy?: string | null,
 ) {
   saveAISettings(input);
-  if (!schoolId || !hasSupabase || !supabase) {
+  if (!schoolId || !canUseSupabase()) {
     return;
   }
-  if (schoolAISettingsTableAvailable === false) {
+  if (!getTableAvail()) {
     return;
   }
   const row = toRow(schoolId, input, updatedBy);
-  const { error } = await supabase.from("school_ai_settings").upsert(row, { onConflict: "school_id" });
+  const { error } = await supabase!.from("school_ai_settings").upsert(row, { onConflict: "school_id" });
   if (error) {
     if (isMissingTableError(error)) {
       schoolAISettingsTableAvailable = false;
@@ -212,3 +234,4 @@ export async function saveSchoolAISettings(
   }
   schoolAISettingsTableAvailable = true;
 }
+

@@ -1,4 +1,4 @@
-import { hasSupabase, supabase } from "@/services/supabase";
+import { canUseSupabase, supabase } from "@/services/supabase";
 import type { LessonPlan, LessonPlanBlock } from "@/types/domain";
 import { DB, ensureSeed, readLocal, writeLocal } from "./baseService";
 
@@ -16,7 +16,7 @@ type LessonPlanBundleBlockInput = Omit<LessonPlanBlock, "id" | "lesson_plan_id">
 
 export async function getLessonPlans(schoolId: string, filters?: LessonPlanFilters) {
   ensureSeed();
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     let query = supabase
       .from("lesson_plans")
       .select("*")
@@ -45,7 +45,7 @@ export async function addLessonPlan(input: CreateLessonPlanInput) {
   const title = input.title.trim();
   if (!title) throw new Error("Lesson plan title is required");
 
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const payload = {
       ...input,
       title,
@@ -77,7 +77,7 @@ export async function addLessonPlan(input: CreateLessonPlanInput) {
 
 export async function getLessonPlanBlocks(lessonPlanId: string) {
   ensureSeed();
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const { data, error } = await supabase
       .from("lesson_plan_blocks")
       .select("*")
@@ -93,7 +93,7 @@ export async function getLessonPlanBlocks(lessonPlanId: string) {
 
 export async function addLessonPlanBlocks(rows: CreateLessonPlanBlockInput[]) {
   if (!rows.length) return [] as LessonPlanBlock[];
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const { data, error } = await supabase.from("lesson_plan_blocks").insert(rows).select("*");
     if (error) throw error;
     return (data ?? []) as LessonPlanBlock[];
@@ -116,7 +116,7 @@ export async function addLessonPlanWithBlocks(input: CreateLessonPlanInput, bloc
 }
 
 export async function deleteLessonPlan(lessonPlanId: string) {
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const { error } = await supabase.from("lesson_plans").delete().eq("id", lessonPlanId);
     if (error) throw error;
     return;
@@ -127,3 +127,4 @@ export async function deleteLessonPlan(lessonPlanId: string) {
     readLocal<LessonPlanBlock>(DB.lessonPlanBlocks).filter((row) => row.lesson_plan_id !== lessonPlanId)
   );
 }
+

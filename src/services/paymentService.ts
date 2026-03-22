@@ -1,4 +1,4 @@
-import { hasSupabase, supabase } from "@/services/supabase";
+import { canUseSupabase, supabase } from "@/services/supabase";
 import type { PaymentEvent, PaymentIntent, PaymentIntentStatus, PaymentProvider } from "@/types/domain";
 import { DB, ensureSeed, readLocal, writeLocal } from "./baseService";
 import { activateSubscriptionAfterPayment, getSchoolSubscription, markSubscriptionPendingPayment } from "./subscriptionService";
@@ -29,7 +29,7 @@ export function buildMerchantTxnId(prefix = "PG") {
 }
 
 export async function getPaymentIntents(schoolId?: string) {
-  if (hasSupabase && supabase && paymentTablesAvailable !== false) {
+  if (canUseSupabase() && paymentTablesAvailable !== false) {
     try {
       let query = supabase.from("payment_intents").select("*").order("created_at", { ascending: false });
       if (schoolId) {
@@ -81,7 +81,7 @@ export async function createPaymentIntent(input: {
     paid_at: null,
   };
 
-  if (hasSupabase && supabase && paymentTablesAvailable !== false) {
+  if (canUseSupabase() && paymentTablesAvailable !== false) {
     try {
       const { data, error } = await supabase.from("payment_intents").insert(payload).select("*").single();
       if (error) {
@@ -123,7 +123,7 @@ export async function appendPaymentEvent(input: {
     payload: input.payload,
     signature_valid: input.signature_valid ?? null,
   };
-  if (hasSupabase && supabase && paymentTablesAvailable !== false) {
+  if (canUseSupabase() && paymentTablesAvailable !== false) {
     try {
       const { data, error } = await supabase.from("payment_events").insert(rowPayload).select("*").single();
       if (error) {
@@ -152,7 +152,7 @@ async function updatePaymentIntentByMerchantTxn(
   merchantTxnId: string,
   patch: Partial<PaymentIntent>,
 ) {
-  if (hasSupabase && supabase && paymentTablesAvailable !== false) {
+  if (canUseSupabase() && paymentTablesAvailable !== false) {
     try {
       const { data, error } = await supabase
         .from("payment_intents")
@@ -182,7 +182,7 @@ async function updatePaymentIntentByMerchantTxn(
 }
 
 async function getPaymentIntentByMerchantTxn(merchantTxnId: string) {
-  if (hasSupabase && supabase && paymentTablesAvailable !== false) {
+  if (canUseSupabase() && paymentTablesAvailable !== false) {
     try {
       const { data, error } = await supabase
         .from("payment_intents")
@@ -356,3 +356,4 @@ export async function processPaymentWebhook(input: {
 
   return { intent: patched || intent, activated: true };
 }
+

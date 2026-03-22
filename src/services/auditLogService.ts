@@ -1,4 +1,4 @@
-import { hasSupabase, supabase } from "@/services/supabase";
+import { canUseSupabase, supabase } from "@/services/supabase";
 import type { AuditLog } from "@/types/domain";
 import { DB, ensureSeed, readLocal, writeLocal } from "./baseService";
 
@@ -21,7 +21,7 @@ export async function getAuditLogs(input?: { schoolId?: string | null; limit?: n
   const schoolId = input?.schoolId || null;
   const limit = Math.max(1, Math.min(500, input?.limit || 100));
 
-  if (hasSupabase && supabase && auditTableAvailable !== false) {
+  if (canUseSupabase() && auditTableAvailable !== false) {
     try {
       let query = supabase.from("audit_logs").select("*").order("created_at", { ascending: false }).limit(limit);
       if (schoolId) {
@@ -71,7 +71,7 @@ export async function logAuditEvent(input: {
     throw new Error("Audit action is required");
   }
 
-  if (hasSupabase && supabase && auditTableAvailable !== false) {
+  if (canUseSupabase() && auditTableAvailable !== false) {
     try {
       const { data, error } = await supabase.from("audit_logs").insert(payload).select("*").single();
       if (error) {
@@ -96,3 +96,4 @@ export async function logAuditEvent(input: {
   writeLocal(DB.auditLogs, [row, ...readLocal<AuditLog>(DB.auditLogs)]);
   return row;
 }
+

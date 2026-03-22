@@ -1,5 +1,7 @@
 import { create } from "zustand";
 import type { GeneratedPaperBundle, UserProfile } from "@/types/domain";
+import { type AISettings } from "@/types/ai";
+import { getAISettings } from "@/services/aiSettings";
 
 type ToastAction = {
   label: string;
@@ -18,7 +20,9 @@ type AppState = {
   activeSchoolId: string | null;
   generatedPaper: GeneratedPaperBundle | null;
   toasts: Toast[];
+  aiSettings: AISettings;
   setProfile: (profile: UserProfile | null) => void;
+  setAiSettings: (settings: AISettings) => void;
   setGeneratedPaper: (bundle: GeneratedPaperBundle | null) => void;
   pushToast: (type: Toast["type"], message: string, action?: ToastAction) => void;
   removeToast: (id: string) => void;
@@ -29,7 +33,9 @@ export const useAppStore = create<AppState>((set) => ({
   activeSchoolId: null,
   generatedPaper: null,
   toasts: [],
+  aiSettings: getAISettings(),
   setProfile: (profile) => set({ profile, activeSchoolId: profile?.school_id ?? null }),
+  setAiSettings: (aiSettings) => set({ aiSettings }),
   setGeneratedPaper: (generatedPaper) => set({ generatedPaper }),
   pushToast: (type, message, action) => {
     const id = crypto.randomUUID();

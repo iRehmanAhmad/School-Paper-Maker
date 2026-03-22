@@ -1,4 +1,4 @@
-import { hasSupabase, supabase } from "@/services/supabase";
+import { canUseSupabase, supabase } from "@/services/supabase";
 import type { Paper, PaperQuestion, QuestionUsage, Blueprint, PaperTemplate, ClassEntity } from "@/types/domain";
 import { DB, ensureSeed, readLocal, writeLocal } from "./baseService";
 import { getQuestions } from "./questionService";
@@ -8,7 +8,7 @@ import { getChapters } from "./chapterService";
 import { assertCanGeneratePaper } from "./subscriptionService";
 
 async function getSchoolIdForPaperClass(classId: string) {
-    if (hasSupabase && supabase) {
+    if (canUseSupabase()) {
         const { data, error } = await supabase.from("classes").select("school_id").eq("id", classId).maybeSingle();
         if (error) {
             throw error;
@@ -26,7 +26,7 @@ export async function savePaperAndUsage(paper: Paper, mappings: PaperQuestion[],
         const requestedSets = Math.max(1, Number((paper.settings_json as any)?.sets || 1));
         await assertCanGeneratePaper(schoolId, requestedSets);
     }
-    if (hasSupabase && supabase) {
+    if (canUseSupabase()) {
         const { error: paperErr } = await supabase.from("papers").insert(paper);
         if (paperErr) {
             throw paperErr;
@@ -48,7 +48,7 @@ export async function savePaperAndUsage(paper: Paper, mappings: PaperQuestion[],
 
 export async function getPapersByTeacher(teacherId: string) {
     ensureSeed();
-    if (hasSupabase && supabase) {
+    if (canUseSupabase()) {
         const { data, error } = await supabase.from("papers").select("*").eq("teacher_id", teacherId).order("created_at", { ascending: false }).limit(30);
         if (error) {
             throw error;
@@ -63,7 +63,7 @@ export async function getPaperBundleById(paperId: string): Promise<any | null> {
     let paper: Paper | undefined;
     let mappings: PaperQuestion[] = [];
 
-    if (hasSupabase && supabase) {
+    if (canUseSupabase()) {
         const { data: pData } = await supabase.from("papers").select("*").eq("id", paperId).single();
         if (!pData) return null;
         paper = pData as Paper;
@@ -151,7 +151,7 @@ export async function getStats(schoolId: string, teacherId: string) {
 
 export async function getBlueprints(subjectIds: string[]) {
     ensureSeed();
-    if (hasSupabase && supabase) {
+    if (canUseSupabase()) {
         const { data, error } = await supabase.from("blueprints").select("*").in("subject_id", subjectIds);
         if (error) {
             throw error;
@@ -163,7 +163,7 @@ export async function getBlueprints(subjectIds: string[]) {
 
 export async function getBlueprintById(blueprintId: string) {
     ensureSeed();
-    if (hasSupabase && supabase) {
+    if (canUseSupabase()) {
         const { data, error } = await supabase.from("blueprints").select("*").eq("id", blueprintId).maybeSingle();
         if (error) {
             throw error;
@@ -174,7 +174,7 @@ export async function getBlueprintById(blueprintId: string) {
 }
 
 export async function addBlueprint(row: Omit<Blueprint, "id">) {
-    if (hasSupabase && supabase) {
+    if (canUseSupabase()) {
         const { data, error } = await supabase.from("blueprints").insert(row).select("*").single();
         if (error) {
             throw error;
@@ -190,7 +190,7 @@ export async function addBlueprint(row: Omit<Blueprint, "id">) {
 
 export async function getTemplates(teacherId: string) {
     ensureSeed();
-    if (hasSupabase && supabase) {
+    if (canUseSupabase()) {
         const { data, error } = await supabase.from("paper_templates").select("*").eq("teacher_id", teacherId).order("created_at", { ascending: false });
         if (error) {
             throw error;
@@ -201,7 +201,7 @@ export async function getTemplates(teacherId: string) {
 }
 
 export async function saveTemplate(input: Omit<PaperTemplate, "id" | "created_at">) {
-    if (hasSupabase && supabase) {
+    if (canUseSupabase()) {
         const { data, error } = await supabase.from("paper_templates").insert(input).select("*").single();
         if (error) {
             throw error;
@@ -212,3 +212,4 @@ export async function saveTemplate(input: Omit<PaperTemplate, "id" | "created_at
     writeLocal(DB.templates, [row, ...readLocal<PaperTemplate>(DB.templates)]);
     return row;
 }
+

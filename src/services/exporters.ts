@@ -454,3 +454,4 @@ export function openPrintableHtmlAllSets(sets: GeneratedSet[], settings: Generat
   popup.document.write(html);
   popup.document.close();
 }
+

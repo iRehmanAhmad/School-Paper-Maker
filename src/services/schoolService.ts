@@ -1,14 +1,14 @@
-import { hasSupabase, supabase } from "@/services/supabase";
+import { canUseSupabase, supabase } from "@/services/supabase";
 import type { School, UserProfile } from "@/types/domain";
-import { DB, ensureSeed, readLocal, writeLocal } from "./baseService";
+import { DB, ensureSeed, readLocal, writeLocal, requireSupabaseAuth } from "./baseService";
 
 function isDuplicateError(error: unknown) {
     const text = `${(error as any)?.message || ""}`.toLowerCase();
     return text.includes("duplicate") || text.includes("unique");
 }
 
-export async function loginWithEmail(email: string): Promise<UserProfile> {
-    return loginWithPassword(email, "");
+export async function loginWithEmail(_email: string): Promise<UserProfile> {
+    throw new Error("Password is required. Use loginWithPassword(email, password).");
 }
 
 function normalizePassword(value: string) {
@@ -55,7 +55,7 @@ export async function loginWithPassword(email: string, password: string): Promis
     const localMatch = localUsers.find((u) => u.email.toLowerCase() === normalizedEmail);
 
     // Local first for demo/offline mode.
-    if (localMatch) {
+    if (!requireSupabaseAuth && localMatch) {
         if (localMatch.password_hash) {
             const incomingHash = await passwordHash(normalizedEmail, normalizedPassword);
             if (localMatch.password_hash !== incomingHash) {
@@ -72,7 +72,7 @@ export async function loginWithPassword(email: string, password: string): Promis
         return migratePlainPasswordIfNeeded(localMatch, normalizedPassword);
     }
 
-    if (hasSupabase && supabase) {
+    if (supabase) {
         const { data, error } = await supabase.auth.signInWithPassword({
             email: normalizedEmail,
             password: normalizedPassword,
@@ -113,7 +113,7 @@ export async function requestPasswordReset(email: string) {
     if (!normalizedEmail) {
         throw new Error("Email is required");
     }
-    if (hasSupabase && supabase) {
+    if (supabase) {
         const redirectTo = typeof window !== "undefined" ? `${window.location.origin}` : undefined;
         const { error } = await supabase.auth.resetPasswordForEmail(normalizedEmail, { redirectTo });
         if (error) {
@@ -127,7 +127,7 @@ export async function requestPasswordReset(email: string) {
 export async function getSchools() {
     ensureSeed();
     const localSchools = readLocal<School>(DB.schools);
-    if (hasSupabase && supabase) {
+    if (canUseSupabase()) {
         try {
             const { data, error } = await supabase.from("schools").select("*").order("name");
             if (error) {
@@ -155,7 +155,7 @@ export async function getSchools() {
 export async function getUsers(schoolId?: string) {
     ensureSeed();
     const localUsers = readLocal<UserProfile>(DB.users);
-    if (hasSupabase && supabase) {
+    if (canUseSupabase()) {
         try {
             let query = supabase.from("users").select("*").order("created_at", { ascending: false });
             if (schoolId) {
@@ -195,7 +195,7 @@ export async function addSchool(name: string) {
     if (existing) {
         throw new Error("School already exists");
     }
-    if (hasSupabase && supabase) {
+    if (canUseSupabase()) {
         try {
             const { data, error } = await supabase.from("schools").insert({ name: nextName }).select("*").single();
             if (error) {
@@ -221,6 +221,9 @@ export async function addSchool(name: string) {
 }
 
 export async function addUserProfile(input: Omit<UserProfile, "id" | "created_at">) {
+    if (requireSupabaseAuth) {
+        throw new Error("Local user management is disabled in production. Create users via Supabase admin.");
+    }
     const email = input.email.trim().toLowerCase();
     const fullName = input.full_name.trim();
     const password = normalizePassword(input.password || "");
@@ -252,7 +255,42 @@ export async function addUserProfile(input: Omit<UserProfile, "id" | "created_at
     return created;
 }
 
+export async function updateUserSchool(userId: string, schoolId: string | null) {
+    if (!userId) {
+        throw new Error("User is required");
+    }
+    if (requireSupabaseAuth && !supabase) {
+        throw new Error("Supabase is not configured.");
+    }
+
+    if (supabase) {
+        const { data, error } = await supabase
+            .from("users")
+            .update({ school_id: schoolId })
+            .eq("id", userId)
+            .select("*")
+            .single();
+        if (error) {
+            throw error;
+        }
+        return data as UserProfile;
+    }
+
+    ensureSeed();
+    const rows = readLocal<UserProfile>(DB.users);
+    const index = rows.findIndex((row) => row.id === userId);
+    if (index < 0) {
+        throw new Error("User not found");
+    }
+    rows[index] = { ...rows[index], school_id: schoolId };
+    writeLocal(DB.users, rows);
+    return rows[index];
+}
+
 export async function resetLocalUserPassword(userId: string, nextPassword: string) {
+    if (requireSupabaseAuth) {
+        throw new Error("Local password reset is disabled in production.");
+    }
     const password = normalizePassword(nextPassword);
     if (password.length < 6) {
         throw new Error("Password must be at least 6 characters");
@@ -277,6 +315,23 @@ export async function changeMyPassword(input: {
     currentPassword: string;
     nextPassword: string;
 }) {
+    if (requireSupabaseAuth) {
+        if (!supabase) {
+            throw new Error("Supabase is not configured.");
+        }
+        const { error } = await supabase.auth.updateUser({ password: input.nextPassword });
+        if (error) {
+            throw error;
+        }
+        return {
+            id: input.userId,
+            email: "",
+            full_name: "",
+            role: "teacher",
+            school_id: "",
+            created_at: new Date().toISOString(),
+        } as UserProfile;
+    }
     const currentPassword = normalizePassword(input.currentPassword);
     const nextPassword = normalizePassword(input.nextPassword);
     if (nextPassword.length < 6) {
@@ -301,7 +356,7 @@ export async function changeMyPassword(input: {
     delete (rows[index] as any).password;
     writeLocal(DB.users, rows);
 
-    if (hasSupabase && supabase) {
+    if (canUseSupabase()) {
         try {
             const { data } = await supabase.auth.getUser();
             if (data.user && data.user.id === user.id) {
@@ -318,3 +373,4 @@ export async function changeMyPassword(input: {
 
     return rows[index];
 }
+

@@ -138,6 +138,26 @@ export type TopicEntity = {
   created_at: string;
 };
 
+export type SubjectOutlineChapter = {
+  title: string;
+  topics: string[];
+};
+
+export type SubjectOutline = {
+  id: string;
+  school_id: string;
+  exam_body_id: string;
+  class_id: string;
+  subject_id: string;
+  source_name: string;
+  source_path?: string | null;
+  source_type: string;
+  outline: SubjectOutlineChapter[];
+  status: "draft" | "approved" | "archived";
+  created_by: string;
+  created_at: string;
+};
+
 export type ContentSource = {
   id: string;
   school_id: string;

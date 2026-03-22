@@ -1,4 +1,4 @@
-import { hasSupabase, supabase } from "@/services/supabase";
+import { canUseSupabase, supabase } from "@/services/supabase";
 import {
   addContentChunks,
   getContentSourceById,
@@ -116,7 +116,7 @@ function mockQuestionPayload(job: GenerationJob, index: number) {
 }
 
 export async function invokeIngestSource(sourceId: string): Promise<IngestSourceResponse> {
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const { data, error } = await supabase.functions.invoke("ingest-source", {
       body: { source_id: sourceId },
     });
@@ -149,7 +149,7 @@ export async function invokeIngestSource(sourceId: string): Promise<IngestSource
 }
 
 export async function invokeRunGenerationJobs(input?: RunGenerationJobsInput): Promise<RunJobsResponse> {
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const { data, error } = await supabase.functions.invoke("run-generation-jobs", {
       body: input || {},
     });
@@ -258,7 +258,7 @@ export async function invokePublishCandidates(candidateIds: string[]): Promise<P
     return { success: true, total: 0, published: 0, skipped: 0, failed: 0, details: [] };
   }
 
-  if (hasSupabase && supabase) {
+  if (canUseSupabase()) {
     const { data, error } = await supabase.functions.invoke("publish-candidates", {
       body: { candidate_ids: ids },
     });
@@ -298,3 +298,4 @@ export async function invokePublishCandidates(candidateIds: string[]): Promise<P
     details,
   };
 }
+

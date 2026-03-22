@@ -1,11 +1,11 @@
-import { hasSupabase, supabase } from "@/services/supabase";
+import { canUseSupabase, supabase } from "@/services/supabase";
 import type { ChapterEntity, Question, ChapterWeightage, PaperQuestion, QuestionUsage, TopicEntity } from "@/types/domain";
 import { DB, ensureSeed, readLocal, writeLocal, normalizeText, DeleteImpact } from "./baseService";
 
 export async function getChapters(subjectIds: string[]) {
     ensureSeed();
-    if (hasSupabase && supabase) {
-        const { data, error } = await supabase.from("chapters").select("*").in("subject_id", subjectIds).order("chapter_number", { ascending: true });
+    if (canUseSupabase()) {
+        const { data, error } = await supabase!.from("chapters").select("*").in("subject_id", subjectIds).order("chapter_number", { ascending: true });
         if (error) {
             throw error;
         }
@@ -19,7 +19,7 @@ export async function addChapter(input: Omit<ChapterEntity, "id" | "created_at">
     if (!nextTitle) {
         throw new Error("Chapter title is required");
     }
-    if (hasSupabase && supabase) {
+    if (canUseSupabase()) {
         const existing = await getChapters([input.subject_id]);
         const titleExists = existing.some((r) => normalizeText(r.title) === normalizeText(nextTitle));
         if (titleExists) {
@@ -29,7 +29,7 @@ export async function addChapter(input: Omit<ChapterEntity, "id" | "created_at">
         if (numberExists) {
             throw new Error("Chapter number already exists");
         }
-        const { data, error } = await supabase.from("chapters").insert({ ...input, title: nextTitle }).select("*").single();
+        const { data, error } = await supabase!.from("chapters").insert({ ...input, title: nextTitle }).select("*").single();
         if (error) {
             throw error;
         }
@@ -53,8 +53,8 @@ export async function addChapter(input: Omit<ChapterEntity, "id" | "created_at">
 }
 
 export async function addChapters(rows: Omit<ChapterEntity, "id" | "created_at">[]) {
-    if (hasSupabase && supabase) {
-        const { data, error } = await supabase.from("chapters").insert(rows).select("*");
+    if (canUseSupabase()) {
+        const { data, error } = await supabase!.from("chapters").insert(rows).select("*");
         if (error) {
             throw error;
         }
@@ -72,8 +72,8 @@ export async function updateChapter(chapterId: string, input: Pick<ChapterEntity
     if (!nextTitle) {
         throw new Error("Chapter title is required");
     }
-    if (hasSupabase && supabase) {
-        const { data: currentRow, error: currentError } = await supabase.from("chapters").select("*").eq("id", chapterId).single();
+    if (canUseSupabase()) {
+        const { data: currentRow, error: currentError } = await supabase!.from("chapters").select("*").eq("id", chapterId).single();
         if (currentError) {
             throw currentError;
         }
@@ -87,7 +87,7 @@ export async function updateChapter(chapterId: string, input: Pick<ChapterEntity
         if (numberExists) {
             throw new Error("Chapter number already exists");
         }
-        const { data, error } = await supabase
+        const { data, error } = await supabase!
             .from("chapters")
             .update({ title: nextTitle, chapter_number: input.chapter_number })
             .eq("id", chapterId)
@@ -123,8 +123,7 @@ export async function reorderChapters(subjectId: string, orderedChapterIds: stri
         return;
     }
 
-    if (hasSupabase && supabase) {
-        const client = supabase;
+    if (canUseSupabase()) {
         const existing = await getChapters([subjectId]);
         const existingIds = existing.map((c) => c.id);
         if (existingIds.length !== orderedChapterIds.length) {
@@ -138,7 +137,7 @@ export async function reorderChapters(subjectId: string, orderedChapterIds: stri
         const offset = 1000;
         const tempResults = await Promise.all(
             orderedChapterIds.map((id, idx) =>
-                client.from("chapters").update({ chapter_number: idx + 1 + offset }).eq("id", id)
+                supabase!.from("chapters").update({ chapter_number: idx + 1 + offset }).eq("id", id)
             )
         );
         const tempError = tempResults.find((res) => res.error)?.error;
@@ -148,7 +147,7 @@ export async function reorderChapters(subjectId: string, orderedChapterIds: stri
 
         const finalResults = await Promise.all(
             orderedChapterIds.map((id, idx) =>
-                client.from("chapters").update({ chapter_number: idx + 1 }).eq("id", id)
+                supabase!.from("chapters").update({ chapter_number: idx + 1 }).eq("id", id)
             )
         );
         const finalError = finalResults.find((res) => res.error)?.error;
@@ -176,9 +175,9 @@ export async function reorderChapters(subjectId: string, orderedChapterIds: stri
 }
 
 export async function deleteChapter(chapterId: string) {
-    if (hasSupabase && supabase) {
-        await supabase.from("topics").delete().eq("chapter_id", chapterId);
-        const { error } = await supabase.from("chapters").delete().eq("id", chapterId);
+    if (canUseSupabase()) {
+        await supabase!.from("topics").delete().eq("chapter_id", chapterId);
+        const { error } = await supabase!.from("chapters").delete().eq("id", chapterId);
         if (error) {
             throw error;
         }
@@ -194,8 +193,8 @@ export async function deleteChapter(chapterId: string) {
 }
 
 export async function getChapterDeleteImpact(chapterId: string): Promise<DeleteImpact> {
-    if (hasSupabase && supabase) {
-        const { data: questions, error } = await supabase.from("questions").select("id").eq("chapter_id", chapterId);
+    if (canUseSupabase()) {
+        const { data: questions, error } = await supabase!.from("questions").select("id").eq("chapter_id", chapterId);
         if (error) {
             throw error;
         }
@@ -208,8 +207,8 @@ export async function getChapterDeleteImpact(chapterId: string): Promise<DeleteI
 
 export async function getChapterWeightage(chapterIds: string[]) {
     ensureSeed();
-    if (hasSupabase && supabase) {
-        const { data, error } = await supabase.from("chapter_weightage").select("*").in("chapter_id", chapterIds);
+    if (canUseSupabase()) {
+        const { data, error } = await supabase!.from("chapter_weightage").select("*").in("chapter_id", chapterIds);
         if (error) {
             throw error;
         }

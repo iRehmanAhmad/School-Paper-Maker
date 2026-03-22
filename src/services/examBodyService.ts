@@ -1,10 +1,10 @@
-import { hasSupabase, supabase } from "@/services/supabase";
+import { canUseSupabase, supabase } from "@/services/supabase";
 import type { ExamBody, ClassEntity, SubjectEntity, ChapterEntity, Question, ChapterWeightage, PaperQuestion, QuestionUsage, TopicEntity } from "@/types/domain";
 import { DB, ensureSeed, readLocal, writeLocal, assertUniqueName, DeleteImpact } from "./baseService";
 
 export async function getExamBodies(schoolId: string) {
-    if (hasSupabase && supabase) {
-        const { data, error } = await supabase.from("exam_bodies").select("*").eq("school_id", schoolId).order("name");
+    if (canUseSupabase()) {
+        const { data, error } = await supabase!.from("exam_bodies").select("*").eq("school_id", schoolId).order("name");
         if (error) {
             throw error;
         }
@@ -19,10 +19,10 @@ export async function addExamBody(input: Omit<ExamBody, "id" | "created_at">) {
     if (!nextName) {
         throw new Error("Exam body name is required");
     }
-    if (hasSupabase && supabase) {
+    if (canUseSupabase()) {
         const existing = await getExamBodies(input.school_id);
         assertUniqueName(existing.map((r) => r.name), nextName, "Exam body");
-        const { data, error } = await supabase.from("exam_bodies").insert({ ...input, name: nextName }).select("*").single();
+        const { data, error } = await supabase!.from("exam_bodies").insert({ ...input, name: nextName }).select("*").single();
         if (error) {
             throw error;
         }
@@ -43,8 +43,8 @@ export async function updateExamBodyName(examBodyId: string, name: string) {
     if (!nextName) {
         throw new Error("Exam body name is required");
     }
-    if (hasSupabase && supabase) {
-        const { data: currentRow, error: currentError } = await supabase.from("exam_bodies").select("*").eq("id", examBodyId).single();
+    if (canUseSupabase()) {
+        const { data: currentRow, error: currentError } = await supabase!.from("exam_bodies").select("*").eq("id", examBodyId).single();
         if (currentError) {
             throw currentError;
         }
@@ -54,7 +54,7 @@ export async function updateExamBodyName(examBodyId: string, name: string) {
             nextName,
             "Exam body",
         );
-        const { data, error } = await supabase.from("exam_bodies").update({ name: nextName }).eq("id", examBodyId).select("*").single();
+        const { data, error } = await supabase!.from("exam_bodies").update({ name: nextName }).eq("id", examBodyId).select("*").single();
         if (error) {
             throw error;
         }
@@ -76,8 +76,8 @@ export async function updateExamBodyName(examBodyId: string, name: string) {
 }
 
 export async function deleteExamBody(examBodyId: string) {
-    if (hasSupabase && supabase) {
-        const { error } = await supabase.from("exam_bodies").delete().eq("id", examBodyId);
+    if (canUseSupabase()) {
+        const { error } = await supabase!.from("exam_bodies").delete().eq("id", examBodyId);
         if (error) {
             throw error;
         }
@@ -101,8 +101,8 @@ export async function deleteExamBody(examBodyId: string) {
 }
 
 export async function getExamBodyDeleteImpact(examBodyId: string): Promise<DeleteImpact> {
-    if (hasSupabase && supabase) {
-        const { data: classes, error: classError } = await supabase.from("classes").select("id").eq("exam_body_id", examBodyId);
+    if (canUseSupabase()) {
+        const { data: classes, error: classError } = await supabase!.from("classes").select("id").eq("exam_body_id", examBodyId);
         if (classError) {
             throw classError;
         }
@@ -110,7 +110,7 @@ export async function getExamBodyDeleteImpact(examBodyId: string): Promise<Delet
         if (!classIds.length) {
             return { classes: 0, subjects: 0, chapters: 0, questions: 0 };
         }
-        const { data: subjects, error: subjectError } = await supabase.from("subjects").select("id").in("class_id", classIds);
+        const { data: subjects, error: subjectError } = await supabase!.from("subjects").select("id").in("class_id", classIds);
         if (subjectError) {
             throw subjectError;
         }
@@ -118,7 +118,7 @@ export async function getExamBodyDeleteImpact(examBodyId: string): Promise<Delet
         if (!subjectIds.length) {
             return { classes: classIds.length, subjects: 0, chapters: 0, questions: 0 };
         }
-        const { data: chapters, error: chapterError } = await supabase.from("chapters").select("id").in("subject_id", subjectIds);
+        const { data: chapters, error: chapterError } = await supabase!.from("chapters").select("id").in("subject_id", subjectIds);
         if (chapterError) {
             throw chapterError;
         }
@@ -126,7 +126,7 @@ export async function getExamBodyDeleteImpact(examBodyId: string): Promise<Delet
         if (!chapterIds.length) {
             return { classes: classIds.length, subjects: subjectIds.length, chapters: 0, questions: 0 };
         }
-        const { data: questions, error: questionError } = await supabase.from("questions").select("id").in("chapter_id", chapterIds);
+        const { data: questions, error: questionError } = await supabase!.from("questions").select("id").in("chapter_id", chapterIds);
         if (questionError) {
             throw questionError;
         }

@@ -1,10 +1,10 @@
-import { hasSupabase, supabase } from "@/services/supabase";
+import { canUseSupabase, supabase } from "@/services/supabase";
 import type { ClassEntity, SubjectEntity, ChapterEntity, Question, ChapterWeightage, PaperQuestion, QuestionUsage, TopicEntity } from "@/types/domain";
 import { DB, ensureSeed, readLocal, writeLocal, assertUniqueName, DeleteImpact } from "./baseService";
 
 export async function getClasses(schoolId: string, examBodyId?: string) {
-    if (hasSupabase && supabase) {
-        let query = supabase.from("classes").select("*").eq("school_id", schoolId).order("created_at", { ascending: false });
+    if (canUseSupabase()) {
+        let query = supabase!.from("classes").select("*").eq("school_id", schoolId).order("created_at", { ascending: false });
         if (examBodyId) {
             query = query.eq("exam_body_id", examBodyId);
         }
@@ -23,10 +23,10 @@ export async function addClass(input: Omit<ClassEntity, "id" | "created_at">) {
     if (!nextName) {
         throw new Error("Class name is required");
     }
-    if (hasSupabase && supabase) {
+    if (canUseSupabase()) {
         const existing = await getClasses(input.school_id, input.exam_body_id);
         assertUniqueName(existing.map((r) => r.name), nextName, "Class");
-        const { data, error } = await supabase.from("classes").insert({ ...input, name: nextName }).select("*").single();
+        const { data, error } = await supabase!.from("classes").insert({ ...input, name: nextName }).select("*").single();
         if (error) {
             throw error;
         }
@@ -47,8 +47,8 @@ export async function updateClassName(classId: string, name: string) {
     if (!nextName) {
         throw new Error("Class name is required");
     }
-    if (hasSupabase && supabase) {
-        const { data: currentRow, error: currentError } = await supabase.from("classes").select("*").eq("id", classId).single();
+    if (canUseSupabase()) {
+        const { data: currentRow, error: currentError } = await supabase!.from("classes").select("*").eq("id", classId).single();
         if (currentError) {
             throw currentError;
         }
@@ -59,7 +59,7 @@ export async function updateClassName(classId: string, name: string) {
             nextName,
             "Class",
         );
-        const { data, error } = await supabase.from("classes").update({ name: nextName }).eq("id", classId).select("*").single();
+        const { data, error } = await supabase!.from("classes").update({ name: nextName }).eq("id", classId).select("*").single();
         if (error) {
             throw error;
         }
@@ -81,8 +81,8 @@ export async function updateClassName(classId: string, name: string) {
 }
 
 export async function deleteClass(classId: string) {
-    if (hasSupabase && supabase) {
-        const { error } = await supabase.from("classes").delete().eq("id", classId);
+    if (canUseSupabase()) {
+        const { error } = await supabase!.from("classes").delete().eq("id", classId);
         if (error) {
             throw error;
         }
@@ -104,8 +104,8 @@ export async function deleteClass(classId: string) {
 }
 
 export async function getClassDeleteImpact(classId: string): Promise<DeleteImpact> {
-    if (hasSupabase && supabase) {
-        const { data: subjects, error: subjectError } = await supabase.from("subjects").select("id").eq("class_id", classId);
+    if (canUseSupabase()) {
+        const { data: subjects, error: subjectError } = await supabase!.from("subjects").select("id").eq("class_id", classId);
         if (subjectError) {
             throw subjectError;
         }
@@ -113,7 +113,7 @@ export async function getClassDeleteImpact(classId: string): Promise<DeleteImpac
         if (!subjectIds.length) {
             return { classes: 1, subjects: 0, chapters: 0, questions: 0 };
         }
-        const { data: chapters, error: chapterError } = await supabase.from("chapters").select("id").in("subject_id", subjectIds);
+        const { data: chapters, error: chapterError } = await supabase!.from("chapters").select("id").in("subject_id", subjectIds);
         if (chapterError) {
             throw chapterError;
         }
@@ -121,7 +121,7 @@ export async function getClassDeleteImpact(classId: string): Promise<DeleteImpac
         if (!chapterIds.length) {
             return { classes: 1, subjects: subjectIds.length, chapters: 0, questions: 0 };
         }
-        const { data: questions, error: questionError } = await supabase.from("questions").select("id").in("chapter_id", chapterIds);
+        const { data: questions, error: questionError } = await supabase!.from("questions").select("id").in("chapter_id", chapterIds);
         if (questionError) {
             throw questionError;
         }
