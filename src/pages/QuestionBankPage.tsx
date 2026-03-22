@@ -1,15 +1,18 @@
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { useFocusManagement } from '../hooks/useFocusManagement';
 import { downloadQuestionTemplate } from "@/utils/templateGenerator";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 import { discussGenerationStrategy, generateQuestionsFromPdf, type AIGeneratedQuestion, type ChatMessage } from "@/services/ai";
 import { ConfirmModal } from "@/components/ConfirmModal";
-import { EmptyState } from "@/components/EmptyState";
-import { LoadingTable } from "@/components/LoadingState";
 import { BulkActionsToolbar } from "@/components/BulkActionsToolbar";
 import { BulkEditModal, type BulkEditValues } from "@/components/BulkEditModal";
+import { QuestionEditModal, type EditQuestionDraft } from "@/components/question-bank/QuestionEditModal";
+import { QuestionManageFilters } from "@/components/question-bank/QuestionManageFilters";
+import { QuestionManageTable } from "@/components/question-bank/QuestionManageTable";
+import { QuestionTypeSelector } from "@/components/question-bank/QuestionTypeSelector";
 import { useHierarchyScopeParams } from "@/hooks/useHierarchyScopeParams";
-import { addQuestions, deleteQuestionsByIds, getGenerationCandidates, getGenerationJobs, getQuestions, getTopics, updateQuestionById } from "@/services/repositories";
+import { addQuestions, deleteQuestionsByIds, getGenerationCandidates, getGenerationJobs, getQuestions, getQuestionsPage, getTopics, updateQuestionById } from "@/services/repositories";
 import { bulkUpdateQuestions, bulkDuplicateQuestions, bulkExportQuestionsToCSV, downloadCSV } from "@/services/bulkOperations";
 import { useUndoDeleteQueue } from "@/hooks/useUndoDeleteQueue";
 import { useAppStore } from "@/store/useAppStore";
@@ -76,20 +79,6 @@ type UploadPreviewRow = {
   mapped?: Omit<Question, "id" | "created_at">;
 };
 
-type EditQuestionDraft = {
-  question_text: string;
-  option_a: string;
-  option_b: string;
-  option_c: string;
-  option_d: string;
-  correct_answer: string;
-  difficulty: Difficulty;
-  bloom_level: BloomLevel | "";
-  question_level: QuestionLevel;
-  explanation: string;
-  diagram_url: string;
-};
-
 type DeleteQuestionIntent = {
   ids: string[];
   snapshots: Question[];
@@ -118,9 +107,13 @@ type ManualSnapshot = {
 };
 
 type UploadStep = "select" | "map" | "preview";
+type EntryMode = "manual" | "upload" | "ai";
+type ChatUIMessage = ChatMessage & { questions?: AIGeneratedQuestion[] };
+type AIEditableField = "question_text" | "options" | "correct_answer";
 
 
 export function QuestionBankPage() {
+  const { restoreFocus } = useFocusManagement();
   const profile = useAppStore((s) => s.profile);
   const toast = useAppStore((s) => s.pushToast);
   const { scope, mergeScope } = useHierarchyScopeParams();
@@ -152,15 +145,18 @@ export function QuestionBankPage() {
   const [manageType, setManageType] = useState<QuestionType | "all">("all");
   const [manageBloom, setManageBloom] = useState<BloomLevel | "all">("all");
   const [selectedQuestionIds, setSelectedQuestionIds] = useState<string[]>([]);
+  const [managePage, setManagePage] = useState(1);
+  const [managePageSize, setManagePageSize] = useState(25);
   const [editingQuestion, setEditingQuestion] = useState<Question | null>(null);
   const [editDraft, setEditDraft] = useState<EditQuestionDraft | null>(null);
+  const activeButtonRef = useRef<HTMLButtonElement | null>(null);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [deleteIntent, setDeleteIntent] = useState<DeleteQuestionIntent | null>(null);
   const [isDeletingQuestions, setIsDeletingQuestions] = useState(false);
   const [showBulkEditModal, setShowBulkEditModal] = useState(false);
   const [isBulkProcessing, setIsBulkProcessing] = useState(false);
 
-  const [entryMode, setEntryMode] = useState<"manual" | "upload" | "ai" | "">("");
+  const [entryMode, setEntryMode] = useState<EntryMode | "">("");
   const [contextLocked, setContextLocked] = useState(false);
   const [lockedContext, setLockedContext] = useState<LockedContext | null>(null);
 
@@ -192,12 +188,12 @@ export function QuestionBankPage() {
   const [aiBloom, setAiBloom] = useState<BloomLevel | "">("");
   const [aiQLevel, setAiQLevel] = useState<QuestionLevel>("exercise");
   const [aiInstructions, setAiInstructions] = useState("");
-  const [aiGenerated, setAiGenerated] = useState<Array<{ question_text: string; options?: string[]; correct_answer?: string; explanation?: string; difficulty?: Difficulty; bloom_level?: BloomLevel; question_level?: QuestionLevel; diagram_url?: string }>>([]);
+  const [aiGenerated, setAiGenerated] = useState<AIGeneratedQuestion[]>([]);
   const [aiLoading, setAiLoading] = useState(false);
 
   // Chat Lab State
   const [chatMode, setChatMode] = useState(false);
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatMessages, setChatMessages] = useState<ChatUIMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [isChatting, setIsChatting] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -214,6 +210,7 @@ export function QuestionBankPage() {
   const [approvedContextCandidateIds, setApprovedContextCandidateIds] = useState<string[]>([]);
   const [loadingApprovedCandidates, setLoadingApprovedCandidates] = useState(false);
   const [publishingApprovedCandidates, setPublishingApprovedCandidates] = useState(false);
+  const manageFetchRequestIdRef = useRef(0);
 
   useEffect(() => {
     if (chatEndRef.current) {
@@ -228,44 +225,43 @@ export function QuestionBankPage() {
     return "border-violet-300 bg-violet-50 dark:border-violet-500/40 dark:bg-slate-900/95";
   }, [questionType]);
 
-  function renderQuestionTypeSelector() {
-    return (
-      <div className="space-y-2">
-        <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 dark:text-slate-300">Question Type</p>
-        <div className="flex flex-wrap gap-2">
-          {quickPresets.map((preset) => (
-            <button
-              key={preset.label}
-              type="button"
-              onClick={() => {
-                setQuestionType(preset.type);
-                setDiff(preset.diff);
-                setBloom(preset.bloom);
-              }}
-              className={`rounded-xl border px-3 py-2 text-xs font-bold uppercase tracking-wide transition-all ${questionType === preset.type ? "border-brand bg-brand text-white shadow-md dark:border-brand/70 dark:bg-brand/90" : "border-slate-300 bg-white text-slate-700 hover:border-brand/50 hover:bg-brand/5 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200 dark:hover:border-brand/60 dark:hover:bg-slate-700/70"}`}
-            >
-              {preset.label.replace(/_/g, " ")}
-            </button>
-          ))}
-        </div>
-      </div>
-    );
-  }
+  const entryModeCards: Array<{ id: EntryMode; label: string; desc: string; icon: string }> = [
+    { id: "manual", label: "Manual Entry", desc: "Type it out", icon: "✍️" },
+    { id: "upload", label: "Smart Bulk", desc: "Excel/CSV Upload", icon: "📤" },
+    { id: "ai", label: "AI Generator", desc: "Extract from PDF", icon: "✨" },
+  ];
 
   async function fetchQuestions() {
+    const requestId = ++manageFetchRequestIdRef.current;
     if (!profile?.school_id) return;
     if (!chapterId) {
       setQuestions([]);
       setRowsCount(0);
+      setLoadingQuestions(false);
       return;
     }
     setLoadingQuestions(true);
     try {
-      const data = await getQuestions(profile.school_id, [chapterId]);
-      setQuestions(data);
-      setRowsCount(data.length);
+      const result = await getQuestionsPage({
+        schoolId: profile.school_id,
+        chapterIds: [chapterId],
+        topicId: topicId || undefined,
+        search: searchQuery,
+        difficulty: manageDifficulty,
+        questionType: manageType,
+        bloomLevel: manageBloom,
+        page: managePage,
+        pageSize: managePageSize,
+      });
+      if (manageFetchRequestIdRef.current !== requestId) {
+        return;
+      }
+      setQuestions(result.rows);
+      setRowsCount(result.total);
     } finally {
-      setLoadingQuestions(false);
+      if (manageFetchRequestIdRef.current === requestId) {
+        setLoadingQuestions(false);
+      }
     }
   }
 
@@ -273,7 +269,13 @@ export function QuestionBankPage() {
     if (viewMode === "manage") {
       fetchQuestions();
     }
-  }, [viewMode, chapterId, profile?.school_id]);
+  }, [viewMode, chapterId, topicId, profile?.school_id, searchQuery, manageDifficulty, manageType, manageBloom, managePage, managePageSize]);
+
+  useEffect(() => {
+    return () => {
+      manageFetchRequestIdRef.current += 1;
+    };
+  }, []);
 
   const visibleSubjects = useMemo(() => subjects.filter((s) => !classId || s.class_id === classId), [subjects, classId]);
   const visibleChapters = useMemo(() => chapters.filter((c) => !subjectId || c.subject_id === subjectId), [chapters, subjectId]);
@@ -490,20 +492,20 @@ export function QuestionBankPage() {
   );
   const manualCanSubmit = Object.keys(manualErrors).length === 0;
 
-  const filteredQuestions = useMemo(
-    () =>
-      questions.filter((q) => {
-        const matchesSearch = q.question_text.toLowerCase().includes(searchQuery.toLowerCase());
-        const matchesDifficulty = manageDifficulty === "all" || q.difficulty === manageDifficulty;
-        const matchesType = manageType === "all" || q.question_type === manageType;
-        const matchesBloom = manageBloom === "all" || (q.bloom_level || "") === manageBloom;
-        const matchesTopic = !topicId || (q.topic_id || "") === topicId;
-        return matchesSearch && matchesDifficulty && matchesType && matchesBloom && matchesTopic;
-      }),
-    [questions, searchQuery, manageDifficulty, manageType, manageBloom, topicId]
-  );
+  useEffect(() => {
+    setManagePage(1);
+  }, [searchQuery, manageDifficulty, manageType, manageBloom, topicId, chapterId, viewMode]);
 
-  const visibleQuestionIds = useMemo(() => filteredQuestions.map((q) => q.id), [filteredQuestions]);
+  const manageTotalPages = Math.max(1, Math.ceil(rowsCount / managePageSize));
+  useEffect(() => {
+    if (managePage > manageTotalPages) {
+      setManagePage(manageTotalPages);
+    }
+  }, [managePage, manageTotalPages]);
+
+  const paginatedQuestions = questions;
+
+  const visibleQuestionIds = useMemo(() => paginatedQuestions.map((q) => q.id), [paginatedQuestions]);
   const allVisibleSelected = visibleQuestionIds.length > 0 && visibleQuestionIds.every((id) => selectedQuestionIds.includes(id));
   const selectedVisibleCount = visibleQuestionIds.filter((id) => selectedQuestionIds.includes(id)).length;
 
@@ -513,8 +515,7 @@ export function QuestionBankPage() {
 
   async function getChapterQuestionsForDuplicateCheck(targetChapterId: string) {
     if (!profile?.school_id) return [] as Question[];
-    const cached = questions.filter((q) => q.chapter_id === targetChapterId);
-    if (cached.length > 0) return cached;
+    // Fetch full chapter list for duplicate detection; manage list is paginated.
     return getQuestions(profile.school_id, [targetChapterId]);
   }
 
@@ -742,19 +743,40 @@ export function QuestionBankPage() {
       return;
     }
     try {
-      const mapped = questions.map(q => ({
-        ...q,
-        school_id: profile.school_id,
-        chapter_id: activeChapterId,
-        topic_id: activeTopicId || null,
-        subject_id: activeContext.subjectId,
-        difficulty: q.difficulty || aiDiff,
-        bloom_level: q.bloom_level || aiBloom || undefined,
-        question_level: q.question_level || aiQLevel,
-        options: q.options || [],
-        correct_answer: q.correct_answer || "",
-        explanation: q.explanation || ""
-      } as any));
+      const mapped: Omit<Question, "id" | "created_at">[] = questions.map((q) => {
+        const base: Omit<Question, "id" | "created_at"> = {
+          school_id: profile.school_id!,
+          chapter_id: activeChapterId,
+          topic_id: activeTopicId || null,
+          question_type: questionType,
+          question_text: q.question_text?.trim() || "",
+          option_a: null,
+          option_b: null,
+          option_c: null,
+          option_d: null,
+          correct_answer: q.correct_answer || null,
+          difficulty: q.difficulty || aiDiff,
+          bloom_level: q.bloom_level || (aiBloom || undefined),
+          question_level: q.question_level || aiQLevel,
+          explanation: q.explanation || null,
+          diagram_url: questionType === "diagram" ? q.diagram_url || null : null,
+        };
+
+        if (questionType === "mcq") {
+          const opts = (q.options || []).slice(0, 4);
+          base.option_a = opts[0] || null;
+          base.option_b = opts[1] || null;
+          base.option_c = opts[2] || null;
+          base.option_d = opts[3] || null;
+          base.correct_answer = (q.correct_answer || "A").toUpperCase();
+        } else if (questionType === "true_false") {
+          base.option_a = "True";
+          base.option_b = "False";
+          base.correct_answer = q.correct_answer || "True";
+        }
+
+        return base;
+      }).filter((q) => q.question_text);
       await addQuestions(mapped);
       toast("success", `Successfully added ${questions.length} questions to the bank!`);
     } catch (err) {
@@ -762,8 +784,8 @@ export function QuestionBankPage() {
     }
   }
 
-  function updateAiItem(idx: number, field: string, value: any) {
-    setAiGenerated((prev) => prev.map((item, i) => i === idx ? { ...item, [field]: value } : item));
+  function updateAiItem<K extends AIEditableField>(idx: number, field: K, value: AIGeneratedQuestion[K]) {
+    setAiGenerated((prev) => prev.map((item, i) => (i === idx ? { ...item, [field]: value } : item)));
   }
 
   async function onManualKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
@@ -939,6 +961,20 @@ export function QuestionBankPage() {
     });
   }
 
+  function closeEditModal() {
+    const currentRef = activeButtonRef.current;
+    setEditingQuestion(null);
+    setEditDraft(null);
+    setTimeout(() => {
+      if (currentRef) {
+        currentRef.focus();
+        activeButtonRef.current = null;
+        return;
+      }
+      restoreFocus();
+    }, 0);
+  }
+
   async function saveEdit() {
     if (!editingQuestion || !editDraft) return;
     const nextText = editDraft.question_text.trim();
@@ -995,8 +1031,15 @@ export function QuestionBankPage() {
         diagram_url: editingQuestion.question_type === "diagram" ? editDraft.diagram_url.trim() || null : null,
       });
       toast("success", "Question updated");
+      const currentRef = activeButtonRef.current;
       setEditingQuestion(null);
       setEditDraft(null);
+      setTimeout(() => {
+        if (currentRef) {
+          currentRef.focus();
+          activeButtonRef.current = null;
+        }
+      }, 0);
       fetchQuestions();
     } finally {
       setIsSavingEdit(false);
@@ -1340,26 +1383,32 @@ export function QuestionBankPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <header className="flex items-center justify-between">
         <div>
-          <h2 className="font-display text-2xl font-bold">Question Bank</h2>
-          <p className="text-sm text-slate-600">Total questions: {rowsCount}</p>
+          <h1 className="font-display text-2xl font-bold">Question Bank</h1>
+          <p className="text-sm text-slate-700 dark:text-slate-300">Total questions: {rowsCount}</p>
         </div>
-        <div className="flex rounded-lg border border-slate-200 bg-white p-1">
+        <div className="flex rounded-lg border border-slate-200 bg-white p-1" role="tablist">
           <button
             onClick={() => setViewMode("manage")}
             className={`rounded-md px-4 py-1.5 text-sm font-medium transition-colors ${viewMode === "manage" ? "bg-brand text-white shadow-sm" : "text-slate-600 hover:text-brand"}`}
+            role="tab"
+            aria-selected={viewMode === "manage"}
+            aria-controls="question-manage-view"
           >
             Manage
           </button>
           <button
             onClick={() => setViewMode("add")}
             className={`rounded-md px-4 py-1.5 text-sm font-medium transition-colors ${viewMode === "add" ? "bg-brand text-white shadow-sm" : "text-slate-600 hover:text-brand"}`}
+            role="tab"
+            aria-selected={viewMode === "add"}
+            aria-controls="question-add-view"
           >
             Add New
           </button>
         </div>
-      </div>
+      </header>
       {viewMode === "manage" ? (
         <>
           <div className="sticky top-2 z-10 space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -1402,73 +1451,24 @@ export function QuestionBankPage() {
           </div>
 
           <div className="space-y-4">
-            <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
-              <label className="block text-xs font-semibold text-slate-600">
-                Search Questions
-                <input
-                  type="text"
-                  placeholder="Search questions by text..."
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-4 py-2 text-sm"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                />
-              </label>
-
-              <div className="grid gap-3 md:grid-cols-3">
-                <div className="space-y-1">
-                  <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Difficulty</p>
-                  <div className="flex flex-wrap gap-2">
-                    {(["all", ...difficultyLevels] as const).map((value) => (
-                      <button
-                        key={value}
-                        type="button"
-                        onClick={() => setManageDifficulty(value)}
-                        className={`rounded-full px-3 py-1 text-xs font-bold capitalize ${manageDifficulty === value ? "bg-brand text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
-                      >
-                        {value}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="space-y-1">
-                  <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Question Type</p>
-                  <div className="flex flex-wrap gap-2">
-                    {(["all", ...questionTypes] as const).map((value) => (
-                      <button
-                        key={value}
-                        type="button"
-                        onClick={() => setManageType(value)}
-                        className={`rounded-full px-3 py-1 text-xs font-bold capitalize ${manageType === value ? "bg-brand text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
-                      >
-                        {value.replace("_", " ")}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="space-y-1">
-                  <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Bloom Level</p>
-                  <div className="flex flex-wrap gap-2">
-                    {(["all", ...blooms] as const).map((value) => (
-                      <button
-                        key={value}
-                        type="button"
-                        onClick={() => setManageBloom(value)}
-                        className={`rounded-full px-3 py-1 text-xs font-bold capitalize ${manageBloom === value ? "bg-brand text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}
-                      >
-                        {value}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
+            <QuestionManageFilters
+              searchQuery={searchQuery}
+              onSearchQueryChange={setSearchQuery}
+              manageDifficulty={manageDifficulty}
+              onManageDifficultyChange={setManageDifficulty}
+              manageType={manageType}
+              onManageTypeChange={setManageType}
+              manageBloom={manageBloom}
+              onManageBloomChange={setManageBloom}
+              difficultyLevels={difficultyLevels}
+              questionTypes={questionTypes}
+              blooms={blooms}
+            />
 
             {/* Bulk Actions Toolbar */}
             <BulkActionsToolbar
               selectedCount={selectedQuestionIds.length}
-              totalCount={filteredQuestions.length}
+              totalCount={rowsCount}
               onClearSelection={handleClearSelection}
               onBulkEdit={() => setShowBulkEditModal(true)}
               onBulkDelete={deleteSelectedQuestions}
@@ -1477,114 +1477,30 @@ export function QuestionBankPage() {
               isProcessing={isBulkProcessing}
             />
 
-            <div className="overflow-x-auto overflow-y-visible rounded-xl border border-slate-200 bg-white">
-              {!chapterId && (
-                <div className="border-b border-slate-200 bg-amber-50 px-4 py-2 text-xs font-semibold text-amber-700">
-                  Select a chapter in Active Context to load questions quickly.
-                </div>
-              )}
-              <table className="min-w-full text-sm">
-                <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
-                  <tr>
-                    <th className="w-10 px-3 py-3">
-                      <input
-                        type="checkbox"
-                        checked={allVisibleSelected}
-                        onChange={(e) => toggleSelectAllVisible(e.target.checked)}
-                        aria-label="Select all visible questions"
-                      />
-                    </th>
-                    <th className="w-36 px-3 py-3">Type</th>
-                    <th className="px-3 py-3">Question</th>
-                    <th className="w-40 px-3 py-3">Topic</th>
-                    <th className="w-40 px-3 py-3">Metadata</th>
-                    <th className="w-48 px-3 py-3">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {loadingQuestions && (
-                    <tr>
-                      <td colSpan={6} className="px-4 py-4">
-                        <LoadingTable rows={8} columns={6} />
-                      </td>
-                    </tr>
-                  )}
-
-                  {!loadingQuestions && filteredQuestions.length === 0 && (
-                    <tr>
-                      <td colSpan={6} className="px-4 py-4">
-                        <EmptyState title="No questions found" description="Try another filter or add new questions in this chapter." />
-                      </td>
-                    </tr>
-                  )}
-
-                  {!loadingQuestions && filteredQuestions.map((q) => (
-                    <tr key={q.id} className="border-t border-slate-100 align-top hover:bg-slate-50/70">
-                      <td className="px-3 py-3">
-                        <input
-                          type="checkbox"
-                          checked={selectedQuestionIds.includes(q.id)}
-                          onChange={() => toggleQuestionSelection(q.id)}
-                          aria-label={`Select question ${q.id}`}
-                        />
-                      </td>
-                      <td className="px-3 py-3">
-                        <span className="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold uppercase text-slate-700">
-                          {q.question_type.replace("_", " ")}
-                        </span>
-                      </td>
-                      <td className="px-3 py-3">
-                        <div className="group relative max-w-2xl">
-                          <p className="line-clamp-2 text-slate-800">{q.question_text}</p>
-                          <div className="pointer-events-none absolute left-0 top-full z-20 mt-2 hidden w-[30rem] rounded-xl border border-slate-200 bg-white p-3 text-xs shadow-2xl group-hover:block">
-                            <p className="font-semibold text-slate-800">{q.question_text}</p>
-                            <div className="mt-2 space-y-1 text-slate-600">
-                              <p><span className="font-bold text-slate-700">Answer:</span> {q.correct_answer || "--"}</p>
-                              <p><span className="font-bold text-slate-700">Difficulty:</span> {q.difficulty}</p>
-                              <p><span className="font-bold text-slate-700">Bloom:</span> {q.bloom_level || "--"}</p>
-                              <p><span className="font-bold text-slate-700">Level:</span> {q.question_level}</p>
-                              <p><span className="font-bold text-slate-700">Topic:</span> {topicTitleById.get(q.topic_id || "") || "--"}</p>
-                            </div>
-                          </div>
-                        </div>
-                      </td>
-                      <td className="px-3 py-3">
-                        <div className="text-xs font-semibold text-slate-600">
-                          {topicTitleById.get(q.topic_id || "") || "No topic"}
-                        </div>
-                      </td>
-                      <td className="px-3 py-3">
-                        <div className="space-y-1">
-                          <span className={`inline-flex rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${q.difficulty === "hard" ? "bg-red-100 text-red-700" : q.difficulty === "medium" ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>
-                            {q.difficulty}
-                          </span>
-                          <p className="text-[10px] font-semibold uppercase text-slate-500">{q.bloom_level || "no bloom"}</p>
-                          <p className="text-[10px] font-semibold text-slate-500">{topicTitleById.get(q.topic_id || "") || "No topic"}</p>
-                        </div>
-                      </td>
-                      <td className="px-3 py-3">
-                        <div className="flex flex-wrap gap-2">
-                          <button type="button" onClick={() => handleEdit(q)} className="rounded-lg border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100">Edit</button>
-                          <button type="button" onClick={() => handleClone(q)} className="rounded-lg border border-brand/40 px-2 py-1 text-xs font-semibold text-brand hover:bg-brand/10">Clone</button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              prepareDeleteIntent([q.id], "Delete this question?");
-                            }}
-                            className="rounded-lg border border-red-300 px-2 py-1 text-xs font-semibold text-red-700 hover:bg-red-50"
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            {selectedVisibleCount > 0 && (
-              <p className="text-xs text-slate-500">{selectedVisibleCount} visible row(s) currently selected.</p>
-            )}
+            <QuestionManageTable
+              chapterId={chapterId}
+              loadingQuestions={loadingQuestions}
+              paginatedQuestions={paginatedQuestions}
+              selectedQuestionIds={selectedQuestionIds}
+              allVisibleSelected={allVisibleSelected}
+              selectedVisibleCount={selectedVisibleCount}
+              topicTitleById={topicTitleById}
+              rowsCount={rowsCount}
+              managePage={managePage}
+              managePageSize={managePageSize}
+              manageTotalPages={manageTotalPages}
+              onToggleSelectAllVisible={toggleSelectAllVisible}
+              onToggleQuestionSelection={toggleQuestionSelection}
+              onEditQuestion={(q, triggerEl) => {
+                activeButtonRef.current = triggerEl;
+                handleEdit(q);
+              }}
+              onCloneQuestion={handleClone}
+              onDeleteQuestion={(questionId) => prepareDeleteIntent([questionId], "Delete this question?")}
+              onManagePageSizeChange={setManagePageSize}
+              onPrevPage={() => setManagePage((prev) => Math.max(1, prev - 1))}
+              onNextPage={() => setManagePage((prev) => Math.min(manageTotalPages, prev + 1))}
+            />
           </div>
         </>
       ) : (
@@ -1658,29 +1574,44 @@ export function QuestionBankPage() {
                 </label>
                 <label className="space-y-1">
                   <span className="text-xs font-bold uppercase text-slate-500">Board Class</span>
-                  <select className="flex h-12 w-full items-center rounded-xl border border-slate-300 bg-slate-50 px-4 text-sm font-medium focus:border-brand focus:ring-1 focus:ring-brand" value={classId} onChange={(e) => applyClass(e.target.value)}>
-                    <option value="">All Classes</option>
+                  <select
+                    className={`flex h-12 w-full items-center rounded-xl border px-4 text-sm font-medium focus:border-brand focus:ring-1 focus:ring-brand ${!examBodyId ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400" : "border-slate-300 bg-slate-50"}`}
+                    value={classId}
+                    onChange={(e) => applyClass(e.target.value)}
+                    disabled={!examBodyId}
+                  >
+                    <option value="">{examBodyId ? "-- Choose Class --" : "Select Exam Body First"}</option>
                     {classes.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                   </select>
                 </label>
                 <label className="space-y-1">
                   <span className="text-xs font-bold uppercase text-slate-500">Subject</span>
-                  <select className="flex h-12 w-full items-center rounded-xl border border-slate-300 bg-slate-50 px-4 text-sm font-medium focus:border-brand focus:ring-1 focus:ring-brand" value={subjectId} onChange={(e) => applySubject(e.target.value)}>
-                    <option value="">All Subjects</option>
+                  <select
+                    className={`flex h-12 w-full items-center rounded-xl border px-4 text-sm font-medium focus:border-brand focus:ring-1 focus:ring-brand ${!classId ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400" : "border-slate-300 bg-slate-50"}`}
+                    value={subjectId}
+                    onChange={(e) => applySubject(e.target.value)}
+                    disabled={!classId}
+                  >
+                    <option value="">{classId ? "-- Choose Subject --" : "Select Class First"}</option>
                     {visibleSubjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                   </select>
                 </label>
                 <label className="space-y-1">
                   <span className="text-xs font-bold uppercase text-slate-500">Specific Chapter</span>
-                  <select className="flex h-12 w-full items-center rounded-xl border border-slate-300 bg-slate-50 px-4 text-sm font-medium focus:border-brand focus:ring-1 focus:ring-brand" value={chapterId} onChange={(e) => applyChapter(e.target.value)}>
-                    <option value="">-- Choose Chapter --</option>
+                  <select
+                    className={`flex h-12 w-full items-center rounded-xl border px-4 text-sm font-medium focus:border-brand focus:ring-1 focus:ring-brand ${!subjectId ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400" : "border-slate-300 bg-slate-50"}`}
+                    value={chapterId}
+                    onChange={(e) => applyChapter(e.target.value)}
+                    disabled={!subjectId}
+                  >
+                    <option value="">{subjectId ? "-- Choose Chapter --" : "Select Subject First"}</option>
                     {visibleChapters.map((c) => <option key={c.id} value={c.id}>{c.title}</option>)}
                   </select>
                 </label>
                 <label className="space-y-1 md:col-span-2">
                   <span className="text-xs font-bold uppercase text-slate-500">Topic (Optional)</span>
                   <select
-                    className="flex h-12 w-full items-center rounded-xl border border-slate-300 bg-slate-50 px-4 text-sm font-medium focus:border-brand focus:ring-1 focus:ring-brand"
+                    className={`flex h-12 w-full items-center rounded-xl border px-4 text-sm font-medium focus:border-brand focus:ring-1 focus:ring-brand ${!chapterId ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400" : "border-slate-300 bg-slate-50"}`}
                     value={topicId}
                     onChange={(e) => applyTopic(e.target.value)}
                     disabled={!chapterId}
@@ -1701,7 +1632,7 @@ export function QuestionBankPage() {
 
           {step === 2 && (
             <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4">
-              <div className="flex items-center justify-between px-2">
+              <nav className="flex items-center justify-between px-2" aria-label="Question bank navigation">
                 {contextLocked ? (
                   <button onClick={() => unlockContext(true)} className="flex items-center gap-1 text-xs font-bold text-slate-500 hover:text-slate-900 dark:text-slate-300 dark:hover:text-white">
                     <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
@@ -1717,7 +1648,7 @@ export function QuestionBankPage() {
                   <p className="text-[10px] font-bold uppercase text-slate-400 dark:text-slate-400">Context</p>
                   <p className="text-xs font-bold text-slate-600 dark:text-slate-200">{activeChapterName} / {activeTopicName}</p>
                 </div>
-              </div>
+              </nav>
 
               <div className={`space-y-4 rounded-3xl border p-8 shadow-lg ${step2Theme}`}>
                 <div className="space-y-1">
@@ -1726,14 +1657,10 @@ export function QuestionBankPage() {
                 </div>
 
                 <div className="grid gap-3 pt-4 sm:grid-cols-3">
-                  {[
-                    { id: "manual", label: "Manual Entry", desc: "Type it out", icon: "✍️" },
-                    { id: "upload", label: "Smart Bulk", desc: "Excel/CSV Upload", icon: "📤" },
-                    { id: "ai", label: "AI Generator", desc: "Extract from PDF", icon: "✨" }
-                  ].map((mode) => (
+                  {entryModeCards.map((mode) => (
                     <button
                       key={mode.id}
-                      onClick={() => { setEntryMode(mode.id as any); setStep(3); }}
+                      onClick={() => { setEntryMode(mode.id); setStep(3); }}
                       className={`relative flex flex-col items-start gap-1 rounded-2xl border-2 p-4 text-left transition-all ${entryMode === mode.id ? "border-brand bg-white shadow-md ring-4 ring-brand/5 dark:border-brand/70 dark:bg-slate-900 dark:ring-brand/20" : "border-transparent bg-white/50 hover:bg-white dark:border-slate-700/50 dark:bg-slate-800/80 dark:hover:bg-slate-800"}`}
                     >
                       <span className="text-xl">{mode.icon}</span>
@@ -1782,14 +1709,16 @@ export function QuestionBankPage() {
                       <button
                         type="button"
                         onClick={() => setManualMode("minimal")}
-                        className={`rounded-full px-3 py-1 text-[11px] font-bold ${manualMode === "minimal" ? "bg-brand text-white" : "bg-slate-100 text-slate-700"}`}
+                        className={`rounded-full px-3 py-1 text-[11px] font-bold ${manualMode === "minimal" ? "bg-blue-700 text-white" : "bg-slate-100 text-slate-700"}`}
+                        aria-pressed={manualMode === "minimal"}
                       >
                         Minimal
                       </button>
                       <button
                         type="button"
                         onClick={() => setManualMode("advanced")}
-                        className={`rounded-full px-3 py-1 text-[11px] font-bold ${manualMode === "advanced" ? "bg-brand text-white" : "bg-slate-100 text-slate-700"}`}
+                        className={`rounded-full px-3 py-1 text-[11px] font-bold ${manualMode === "advanced" ? "bg-blue-700 text-white" : "bg-slate-100 text-slate-700"}`}
+                        aria-pressed={manualMode === "advanced"}
                       >
                         Advanced
                       </button>
@@ -1797,13 +1726,14 @@ export function QuestionBankPage() {
                         type="button"
                         onClick={clonePreviousManual}
                         className="rounded-full border border-slate-300 bg-white px-3 py-1 text-[11px] font-bold text-slate-700 hover:bg-slate-50"
+                        aria-label="Clone previous question settings"
                       >
                         Clone Previous
                       </button>
                     </div>
                   </div>
 
-                  {renderQuestionTypeSelector()}
+                  <QuestionTypeSelector presets={quickPresets} activeType={questionType} onSelect={(preset) => { setQuestionType(preset.type); setDiff(preset.diff); setBloom(preset.bloom); }} />
                   <p className="rounded-lg bg-slate-100 px-3 py-2 text-xs text-slate-600">{typeHints[questionType]}</p>
                   {manualValidationActive && manualErrors.context && <p className="text-xs font-semibold text-red-600">{manualErrors.context}</p>}
 
@@ -1912,7 +1842,7 @@ export function QuestionBankPage() {
                     </label>
                     {manualMode === "advanced" && (
                       <label className="text-xs font-semibold text-slate-600">Bloom Level
-                        <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={bloom} onChange={(e) => setBloom(e.target.value as any)}>
+                        <select className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={bloom} onChange={(e) => setBloom((e.target.value || "") as BloomLevel | "")}>
                           <option value="">-- Optional --</option>
                           {blooms.map((x) => <option key={x} value={x}>{x}</option>)}
                         </select>
@@ -1940,8 +1870,23 @@ export function QuestionBankPage() {
                   )}
 
                   <div className="flex gap-2">
-                    <button type="submit" className="rounded-lg bg-brand px-4 py-2 text-white">Save & Add Another</button>
-                    <button type="button" onClick={() => saveManual(true)} className="rounded-lg bg-slate-700 px-4 py-2 text-white">Save & Close</button>
+                    <button
+                      type="submit"
+                      className="rounded-lg bg-blue-700 px-4 py-2 text-white"
+                      aria-describedby="save-instructions"
+                    >
+                      Save & Add Another
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => saveManual(true)}
+                      className="rounded-lg bg-slate-700 px-4 py-2 text-white"
+                    >
+                      Save & Close
+                    </button>
+                    <p id="save-instructions" className="sr-only">
+                      Press Ctrl+Enter to quickly save and add another question
+                    </p>
                     {manualValidationActive && !manualCanSubmit && (
                       <p className="self-center text-xs font-semibold text-red-600">Please fix highlighted fields.</p>
                     )}
@@ -1956,7 +1901,7 @@ export function QuestionBankPage() {
                     <p className="text-sm text-slate-500">Step-by-step import: select file, map columns, preview rows, then confirm upload.</p>
                   </div>
 
-                  {renderQuestionTypeSelector()}
+                  <QuestionTypeSelector presets={quickPresets} activeType={questionType} onSelect={(preset) => { setQuestionType(preset.type); setDiff(preset.diff); setBloom(preset.bloom); }} />
 
                   <div className="grid gap-2 sm:grid-cols-3">
                     {[
@@ -2120,7 +2065,7 @@ export function QuestionBankPage() {
 
               {entryMode === "ai" && (
                 <div className="space-y-4 rounded-xl border border-slate-200 bg-white p-4">
-                  {renderQuestionTypeSelector()}
+                  <QuestionTypeSelector presets={quickPresets} activeType={questionType} onSelect={(preset) => { setQuestionType(preset.type); setDiff(preset.diff); setBloom(preset.bloom); }} />
                   <div className="flex items-center justify-between">
                     <p className="text-xs font-semibold text-slate-500 uppercase tracking-widest">AI Generation Strategy</p>
                     <button
@@ -2146,19 +2091,19 @@ export function QuestionBankPage() {
                             <div className={`max-w-[85%] rounded-2xl px-4 py-2 text-sm shadow-sm ${msg.role === "user" ? "bg-brand text-white rounded-br-none" : "bg-white text-slate-800 rounded-bl-none border border-slate-200"}`}>
                               {msg.content}
                             </div>
-                            {(msg as any).questions && (msg as any).questions.length > 0 && (
+                            {msg.questions && msg.questions.length > 0 && (
                               <div className="mt-2 w-full max-w-[90%] space-y-2 rounded-xl bg-slate-100 p-3 shadow-inner">
                                 <div className="flex items-center justify-between mb-2">
-                                  <span className="text-[10px] font-bold text-slate-500 uppercase">Generated Questions ({(msg as any).questions.length})</span>
+                                  <span className="text-[10px] font-bold text-slate-500 uppercase">Generated Questions ({msg.questions.length})</span>
                                   <button
-                                    onClick={() => addChatQuestions((msg as any).questions)}
+                                    onClick={() => addChatQuestions(msg.questions)}
                                     className="bg-emerald-500 text-white text-[10px] font-bold px-2 py-1 rounded shadow-sm hover:bg-emerald-600 transition-colors"
                                   >
                                     ADD ALL TO BANK
                                   </button>
                                 </div>
                                 <div className="space-y-2 max-h-[150px] overflow-y-auto pr-1">
-                                  {(msg as any).questions.map((q: any, qi: number) => (
+                                  {msg.questions.map((q, qi) => (
                                     <div key={qi} className="p-2 bg-white rounded border border-slate-200 text-[11px] leading-tight">
                                       <span className="font-bold text-brand">Q{qi + 1}:</span> {q.question_text}
                                     </div>
@@ -2217,7 +2162,7 @@ export function QuestionBankPage() {
                         </div>
                         <div className="grid grid-cols-3 gap-2">
                           <label className="text-xs font-bold text-slate-600">Count <input className="mt-1 w-full rounded border px-2 py-1" type="number" value={aiCount} onChange={(e) => setAiCount(Number(e.target.value))} /></label>
-                          <label className="text-xs font-bold text-slate-600 font-display">Bloom Level <select className="mt-1 w-full rounded border px-2 py-1" value={aiBloom} onChange={(e) => setAiBloom(e.target.value as any)}><option value="">-- Optional/Mixed --</option>{blooms.map(b => <option key={b} value={b}>{b}</option>)}</select></label>
+                          <label className="text-xs font-bold text-slate-600 font-display">Bloom Level <select className="mt-1 w-full rounded border px-2 py-1" value={aiBloom} onChange={(e) => setAiBloom((e.target.value || "") as BloomLevel | "")}><option value="">-- Optional/Mixed --</option>{blooms.map(b => <option key={b} value={b}>{b}</option>)}</select></label>
                           <label className="text-xs font-bold text-slate-600 font-display">Level <select className="mt-1 w-full rounded border px-2 py-1" value={aiQLevel} onChange={(e) => setAiQLevel(e.target.value as QuestionLevel)}>{questionLevels.map(lvl => <option key={lvl.id} value={lvl.id}>{lvl.label}</option>)}</select></label>
                         </div>
                         <button onClick={generateFromAI} disabled={aiLoading} className="w-full rounded-lg bg-brand py-2 font-bold text-white shadow-lg disabled:opacity-50">
@@ -2290,171 +2235,17 @@ export function QuestionBankPage() {
         onConfirm={confirmDeleteIntent}
       />
 
-      {editingQuestion && editDraft && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4">
-          <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-2xl bg-white p-6 shadow-2xl">
-            <div className="mb-4 flex items-start justify-between">
-              <div>
-                <h3 className="font-display text-xl font-bold text-slate-900">Edit Question</h3>
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  Type: {editingQuestion.question_type.replace("_", " ")}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setEditingQuestion(null);
-                  setEditDraft(null);
-                }}
-                className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-100"
-              >
-                Close
-              </button>
-            </div>
-
-            <div className="space-y-4">
-              <label className="block text-xs font-semibold text-slate-600">
-                Question Text
-                <textarea
-                  rows={4}
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                  value={editDraft.question_text}
-                  onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, question_text: e.target.value } : prev))}
-                />
-              </label>
-
-              {editingQuestion.question_type === "mcq" && (
-                <div className="grid gap-3 md:grid-cols-2">
-                  <label className="text-xs font-semibold text-slate-600">Option A
-                    <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={editDraft.option_a} onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, option_a: e.target.value } : prev))} />
-                  </label>
-                  <label className="text-xs font-semibold text-slate-600">Option B
-                    <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={editDraft.option_b} onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, option_b: e.target.value } : prev))} />
-                  </label>
-                  <label className="text-xs font-semibold text-slate-600">Option C
-                    <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={editDraft.option_c} onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, option_c: e.target.value } : prev))} />
-                  </label>
-                  <label className="text-xs font-semibold text-slate-600">Option D
-                    <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" value={editDraft.option_d} onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, option_d: e.target.value } : prev))} />
-                  </label>
-                </div>
-              )}
-
-              {editingQuestion.question_type === "true_false" && (
-                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-                  True/False options are fixed as Option A = True and Option B = False.
-                </div>
-              )}
-
-              {editingQuestion.question_type === "diagram" && (
-                <label className="block text-xs font-semibold text-slate-600">
-                  Diagram URL
-                  <input
-                    className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                    value={editDraft.diagram_url}
-                    onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, diagram_url: e.target.value } : prev))}
-                  />
-                </label>
-              )}
-
-              <div className="grid gap-3 md:grid-cols-2">
-                <label className="text-xs font-semibold text-slate-600">
-                  Correct Answer
-                  {editingQuestion.question_type === "mcq" ? (
-                    <select
-                      className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                      value={editDraft.correct_answer}
-                      onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, correct_answer: e.target.value } : prev))}
-                    >
-                      {["A", "B", "C", "D"].map((choice) => <option key={choice} value={choice}>{choice}</option>)}
-                    </select>
-                  ) : editingQuestion.question_type === "true_false" ? (
-                    <select
-                      className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                      value={editDraft.correct_answer}
-                      onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, correct_answer: e.target.value } : prev))}
-                    >
-                      {["True", "False"].map((choice) => <option key={choice} value={choice}>{choice}</option>)}
-                    </select>
-                  ) : (
-                    <input
-                      className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                      value={editDraft.correct_answer}
-                      onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, correct_answer: e.target.value } : prev))}
-                    />
-                  )}
-                </label>
-
-                <label className="text-xs font-semibold text-slate-600">
-                  Difficulty
-                  <select
-                    className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                    value={editDraft.difficulty}
-                    onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, difficulty: e.target.value as Difficulty } : prev))}
-                  >
-                    {difficultyLevels.map((d) => <option key={d} value={d}>{d}</option>)}
-                  </select>
-                </label>
-
-                <label className="text-xs font-semibold text-slate-600">
-                  Bloom Level
-                  <select
-                    className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                    value={editDraft.bloom_level}
-                    onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, bloom_level: e.target.value as BloomLevel | "" } : prev))}
-                  >
-                    <option value="">-- None --</option>
-                    {blooms.map((b) => <option key={b} value={b}>{b}</option>)}
-                  </select>
-                </label>
-
-                <label className="text-xs font-semibold text-slate-600">
-                  Question Level
-                  <select
-                    className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                    value={editDraft.question_level}
-                    onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, question_level: e.target.value as QuestionLevel } : prev))}
-                  >
-                    {questionLevels.map((lvl) => <option key={lvl.id} value={lvl.id}>{lvl.label}</option>)}
-                  </select>
-                </label>
-              </div>
-
-              <label className="block text-xs font-semibold text-slate-600">
-                Explanation / Rubric Hint
-                <textarea
-                  rows={3}
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                  value={editDraft.explanation}
-                  onChange={(e) => setEditDraft((prev) => (prev ? { ...prev, explanation: e.target.value } : prev))}
-                />
-              </label>
-
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setEditingQuestion(null);
-                    setEditDraft(null);
-                  }}
-                  className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={saveEdit}
-                  disabled={isSavingEdit}
-                  className="rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
-                >
-                  {isSavingEdit ? "Saving..." : "Save Changes"}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
+      <QuestionEditModal
+        question={editingQuestion}
+        draft={editDraft}
+        difficultyLevels={difficultyLevels}
+        blooms={blooms}
+        questionLevels={questionLevels}
+        isSaving={isSavingEdit}
+        onClose={closeEditModal}
+        onSave={saveEdit}
+        onDraftChange={setEditDraft}
+      />
       {/* Bulk Edit Modal */}
       {showBulkEditModal && (
         <BulkEditModal
@@ -2468,3 +2259,5 @@ export function QuestionBankPage() {
     </div>
   );
 }
+
+

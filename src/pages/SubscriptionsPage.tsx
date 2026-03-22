@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import { ConfirmModal } from "@/components/ConfirmModal";
 import {
   addSchool,
   addUserProfile,
@@ -8,7 +9,7 @@ import {
   getPaymentIntents,
   getSchools,
   getSubscriptionPlans,
-  getSubscriptionSummary,
+  getSubscriptionSummaries,
   getUsers,
   logAuditEvent,
   markManualPaymentAndActivate,
@@ -29,6 +30,15 @@ type SchoolRow = {
 };
 
 type SaleMode = "paid" | "pending";
+type ConfirmActionKind = "bulk_suspend" | "bulk_cancel" | "single_cancel";
+
+type RevenueSnapshot = {
+  collectedAllTime: number;
+  collectedThisMonth: number;
+  collectedLast30Days: number;
+  pendingAmount: number;
+  successCountThisMonth: number;
+};
 
 function toDateInput(value?: string | null) {
   if (!value) return "";
@@ -82,6 +92,23 @@ function addMonths(date: Date, months: number) {
   return next;
 }
 
+function resolveExtensionEndDate(previousEnd?: string | null) {
+  const now = new Date();
+  const parsed = previousEnd ? new Date(previousEnd) : null;
+  const hasValidDate = parsed && !Number.isNaN(parsed.getTime());
+  const base = hasValidDate && (parsed as Date).getTime() > now.getTime() ? (parsed as Date) : now;
+  return addMonths(base, 1);
+}
+
+function generateTemporaryPassword() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%";
+  let out = "";
+  for (let i = 0; i < 12; i += 1) {
+    out += alphabet[Math.floor(Math.random() * alphabet.length)];
+  }
+  return out;
+}
+
 const statusClassMap: Record<SubscriptionStatus, string> = {
   pending_payment: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
   active: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
@@ -99,6 +126,7 @@ export function SubscriptionsPage() {
   const [plans, setPlans] = useState<SubscriptionPlan[]>([]);
   const [selectedSchoolId, setSelectedSchoolId] = useState("");
   const [paymentIntents, setPaymentIntents] = useState<PaymentIntent[]>([]);
+  const [allPaymentIntents, setAllPaymentIntents] = useState<PaymentIntent[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -113,7 +141,7 @@ export function SubscriptionsPage() {
   const [newSchoolName, setNewSchoolName] = useState("");
   const [newUserName, setNewUserName] = useState("");
   const [newUserEmail, setNewUserEmail] = useState("");
-  const [newUserPassword, setNewUserPassword] = useState("client123");
+  const [newUserPassword, setNewUserPassword] = useState(() => generateTemporaryPassword());
   const [newPlanId, setNewPlanId] = useState("");
   const [newSaleMode, setNewSaleMode] = useState<SaleMode>("paid");
   const [newProvider, setNewProvider] = useState<PaymentProvider>("manual");
@@ -131,6 +159,7 @@ export function SubscriptionsPage() {
   const [currentPage, setCurrentPage] = useState(1);
   const [selectedSchoolIds, setSelectedSchoolIds] = useState<string[]>([]);
   const [assignUserId, setAssignUserId] = useState("");
+  const [confirmAction, setConfirmAction] = useState<ConfirmActionKind | null>(null);
 
   const selectedRow = useMemo(() => rows.find((row) => row.school.id === selectedSchoolId) || null, [rows, selectedSchoolId]);
   const lastPayment = useMemo(() => (paymentIntents.length ? paymentIntents[0] : null), [paymentIntents]);
@@ -152,6 +181,61 @@ export function SubscriptionsPage() {
   const visibleRowIds = useMemo(() => paginatedRows.map((row) => row.school.id), [paginatedRows]);
   const allVisibleSelected = visibleRowIds.length > 0 && visibleRowIds.every((id) => selectedSchoolIds.includes(id));
   const selectedVisibleCount = visibleRowIds.filter((id) => selectedSchoolIds.includes(id)).length;
+  const selectedUpdatePlan = useMemo(() => plans.find((plan) => plan.id === updatePlanId) || null, [plans, updatePlanId]);
+
+  const revenueSnapshot = useMemo<RevenueSnapshot>(() => {
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+    const last30DaysStart = now.getTime() - 30 * 24 * 60 * 60 * 1000;
+
+    let collectedAllTime = 0;
+    let collectedThisMonth = 0;
+    let collectedLast30Days = 0;
+    let pendingAmount = 0;
+    let successCountThisMonth = 0;
+
+    allPaymentIntents.forEach((intent) => {
+      const amount = Number(intent.amount_pkr || 0);
+      const createdAt = new Date(intent.created_at).getTime();
+      if (intent.status === "success") {
+        collectedAllTime += amount;
+        if (!Number.isNaN(createdAt) && createdAt >= monthStart) {
+          collectedThisMonth += amount;
+          successCountThisMonth += 1;
+        }
+        if (!Number.isNaN(createdAt) && createdAt >= last30DaysStart) {
+          collectedLast30Days += amount;
+        }
+      } else if (intent.status === "pending") {
+        pendingAmount += amount;
+      }
+    });
+
+    return {
+      collectedAllTime,
+      collectedThisMonth,
+      collectedLast30Days,
+      pendingAmount,
+      successCountThisMonth,
+    };
+  }, [allPaymentIntents]);
+
+  const renewalAlerts = useMemo(
+    () =>
+      rows
+        .filter((row) => row.summary.status === "active" && row.summary.daysRemaining >= 0 && row.summary.daysRemaining <= 14)
+        .sort((a, b) => a.summary.daysRemaining - b.summary.daysRemaining),
+    [rows],
+  );
+
+  const renewalCounts = useMemo(
+    () => ({
+      urgent3: renewalAlerts.filter((row) => row.summary.daysRemaining <= 3).length,
+      week7: renewalAlerts.filter((row) => row.summary.daysRemaining <= 7).length,
+      fortnight14: renewalAlerts.length,
+    }),
+    [renewalAlerts],
+  );
 
   const totals = useMemo(() => {
     let active = 0;
@@ -222,13 +306,22 @@ export function SubscriptionsPage() {
     setLoading(true);
     try {
       const [schoolRows, usersRows, planRows] = await Promise.all([getSchools(), getUsers(), getSubscriptionPlans()]);
-      const mapped: SchoolRow[] = await Promise.all(
-        schoolRows.map(async (school) => {
-          const summary = await getSubscriptionSummary(school.id);
-          const users = usersRows.filter((row) => row.school_id === school.id);
-          return { school: { id: school.id, name: school.name }, summary, users };
-        }),
-      );
+      const summaryMap = await getSubscriptionSummaries(schoolRows.map((school) => school.id));
+      try {
+        const payments = await getPaymentIntents();
+        setAllPaymentIntents(payments);
+      } catch {
+        setAllPaymentIntents([]);
+      }
+      const mapped: SchoolRow[] = schoolRows.map((school) => {
+        const summary = summaryMap[school.id];
+        const users = usersRows.filter((row) => row.school_id === school.id);
+        return {
+          school: { id: school.id, name: school.name },
+          summary,
+          users,
+        };
+      });
       mapped.sort((a, b) => a.school.name.localeCompare(b.school.name));
       setRows(mapped);
       setAllUsers(usersRows);
@@ -369,7 +462,7 @@ export function SubscriptionsPage() {
     setBusy(true);
     try {
       await updateUserSchool(assignUserId, selectedRow.school.id);
-      await logAuditEvent({
+      await writeAudit({
         schoolId: selectedRow.school.id,
         action: "user_assigned_to_school",
         targetType: "user",
@@ -467,6 +560,91 @@ export function SubscriptionsPage() {
       });
     });
   }
+
+  async function bulkExtendOneMonth() {
+    await runBulkAction("Extended +1 month", async (row) => {
+      const subscription = row.summary.subscription;
+      const newEnd = resolveExtensionEndDate(subscription?.ends_at);
+      await upsertSchoolSubscription({
+        school_id: row.school.id,
+        plan_id: subscription?.plan_id || row.summary.plan.id,
+        status: row.summary.status,
+        starts_at: subscription?.starts_at || new Date().toISOString(),
+        ends_at: newEnd.toISOString(),
+        payment_method: subscription?.payment_method || "manual",
+        transaction_id: subscription?.transaction_id || null,
+        paid_at: row.summary.status === "active" ? new Date().toISOString() : subscription?.paid_at || null,
+        created_by: profile?.id || null,
+      });
+      await writeAudit({
+        schoolId: row.school.id,
+        action: "subscription_extended_bulk",
+        targetType: "subscription",
+        targetId: subscription?.id || row.school.id,
+        details: { new_end: newEnd.toISOString(), previous_end: subscription?.ends_at || null },
+      });
+    });
+  }
+
+  function requestBulkSuspend() {
+    if (!selectedSchoolIds.length) {
+      toast("error", "Select at least one school first");
+      return;
+    }
+    setConfirmAction("bulk_suspend");
+  }
+
+  function requestBulkCancel() {
+    if (!selectedSchoolIds.length) {
+      toast("error", "Select at least one school first");
+      return;
+    }
+    setConfirmAction("bulk_cancel");
+  }
+
+  function requestSingleCancel() {
+    if (!selectedRow) return;
+    setConfirmAction("single_cancel");
+  }
+
+  async function confirmCurrentAction() {
+    if (!confirmAction) return;
+    setConfirmAction(null);
+    if (confirmAction === "bulk_suspend") {
+      await bulkSuspend();
+      return;
+    }
+    if (confirmAction === "bulk_cancel") {
+      await bulkCancelNow();
+      return;
+    }
+    await cancelSelectedNow();
+  }
+
+  const confirmModalState = useMemo(() => {
+    if (!confirmAction) {
+      return null;
+    }
+    if (confirmAction === "bulk_suspend") {
+      return {
+        title: "Suspend selected subscriptions?",
+        message: `This will suspend ${selectedSchoolIds.length} selected school subscription(s).`,
+        confirmLabel: "Suspend",
+      };
+    }
+    if (confirmAction === "bulk_cancel") {
+      return {
+        title: "Cancel selected subscriptions now?",
+        message: `This will cancel ${selectedSchoolIds.length} selected school subscription(s) immediately.`,
+        confirmLabel: "Cancel now",
+      };
+    }
+    return {
+      title: "Cancel this subscription now?",
+      message: selectedRow ? `This will immediately cancel ${selectedRow.school.name}'s active plan.` : "This action cannot be undone.",
+      confirmLabel: "Cancel now",
+    };
+  }, [confirmAction, selectedSchoolIds.length, selectedRow]);
   async function submitUpdateSubscription(event: FormEvent) {
     event.preventDefault();
     if (!selectedRow) return;
@@ -596,9 +774,7 @@ export function SubscriptionsPage() {
   async function extendSelectedOneMonth() {
     if (!selectedRow) return;
     const subscription = selectedRow.summary.subscription;
-    const baseEnd = subscription?.ends_at ? new Date(subscription.ends_at) : new Date();
-    const safeBase = Number.isNaN(baseEnd.getTime()) ? new Date() : baseEnd;
-    const newEnd = addMonths(safeBase, 1);
+    const newEnd = resolveExtensionEndDate(subscription?.ends_at);
     const status = selectedRow.summary.status;
     setBusy(true);
     try {
@@ -701,12 +877,12 @@ export function SubscriptionsPage() {
       });
 
       setCreatedLoginHint(
-        `Client created. Login: ${newUserEmail.trim().toLowerCase()} / ${newUserPassword.trim()} (user can change later).`,
+        `Client created. Login email: ${newUserEmail.trim().toLowerCase()}. Temporary password is set and should be shared securely.`,
       );
       setNewSchoolName("");
       setNewUserName("");
       setNewUserEmail("");
-      setNewUserPassword("client123");
+      setNewUserPassword(generateTemporaryPassword());
       setNewTxnId("");
       setNewPhone("");
       setNewNotes("");
@@ -770,8 +946,89 @@ export function SubscriptionsPage() {
         <StatCard label="Advanced" value={String(totals.advanced)} />
       </section>
 
-      <section className="grid gap-6 xl:grid-cols-[minmax(540px,1.2fr)_1fr]">
-        <div className="rounded-2xl border border-slate-200 bg-card p-4 shadow-soft dark:border-slate-800">
+      <section className="rounded-2xl border border-slate-200 bg-card p-4 shadow-soft dark:border-slate-800">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Revenue Snapshot</h2>
+          <span className="text-xs text-slate-500 dark:text-slate-400">{revenueSnapshot.successCountThisMonth} paid txns this month</span>
+        </div>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <InfoCard label="Collected (All Time)" value={formatPkr(revenueSnapshot.collectedAllTime)} />
+          <InfoCard label="Collected (This Month)" value={formatPkr(revenueSnapshot.collectedThisMonth)} />
+          <InfoCard label="Collected (Last 30 Days)" value={formatPkr(revenueSnapshot.collectedLast30Days)} />
+          <InfoCard label="Pending Collection" value={formatPkr(revenueSnapshot.pendingAmount)} />
+        </div>
+      </section>
+
+      <section className="rounded-2xl border border-slate-200 bg-card p-4 shadow-soft dark:border-slate-800">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Renewal Alerts</h2>
+          <div className="flex flex-wrap gap-2 text-xs">
+            <span className="rounded-full bg-rose-100 px-2 py-1 font-semibold text-rose-700 dark:bg-rose-900/30 dark:text-rose-300">
+              3 days: {renewalCounts.urgent3}
+            </span>
+            <span className="rounded-full bg-amber-100 px-2 py-1 font-semibold text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+              7 days: {renewalCounts.week7}
+            </span>
+            <span className="rounded-full bg-brand/10 px-2 py-1 font-semibold text-brand">14 days: {renewalCounts.fortnight14}</span>
+          </div>
+        </div>
+        {renewalAlerts.length ? (
+          <div className="mt-3 overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
+            <table className="w-full min-w-[620px] text-left text-sm">
+              <thead className="bg-slate-50 dark:bg-slate-900/40">
+                <tr className="border-b border-slate-200 text-[11px] uppercase text-slate-500 dark:border-slate-800 dark:text-slate-400">
+                  <th className="px-2 py-2">School</th>
+                  <th className="px-2 py-2">Plan</th>
+                  <th className="px-2 py-2">End Date</th>
+                  <th className="px-2 py-2">Days Left</th>
+                  <th className="px-2 py-2">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {renewalAlerts.slice(0, 10).map((row) => (
+                  <tr key={row.school.id} className="border-b border-slate-100 dark:border-slate-800/70">
+                    <td className="px-2 py-2 font-semibold text-ink">{row.school.name}</td>
+                    <td className="px-2 py-2">{row.summary.plan.name}</td>
+                    <td className="px-2 py-2">{formatDate(row.summary.subscription?.ends_at)}</td>
+                    <td className="px-2 py-2">
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                          row.summary.daysRemaining <= 3
+                            ? "bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300"
+                            : row.summary.daysRemaining <= 7
+                              ? "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+                              : "bg-brand/10 text-brand"
+                        }`}
+                      >
+                        {row.summary.daysRemaining} day(s)
+                      </span>
+                    </td>
+                    <td className="px-2 py-2">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedSchoolId(row.school.id)}
+                        className="rounded-lg border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-900"
+                      >
+                        Open
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {renewalAlerts.length > 10 ? (
+              <p className="border-t border-slate-200 px-3 py-2 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
+                Showing 10 of {renewalAlerts.length} expiring schools.
+              </p>
+            ) : null}
+          </div>
+        ) : (
+          <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">No active subscriptions expiring within 14 days.</p>
+        )}
+      </section>
+
+      <section className="grid items-start gap-6 xl:grid-cols-[minmax(540px,1.2fr)_1fr]">
+        <div className="flex h-full flex-col rounded-2xl border border-slate-200 bg-card p-4 shadow-soft dark:border-slate-800">
           <div className="flex items-center justify-between gap-2">
             <h2 className="text-sm font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Schools</h2>
             <span className="text-xs text-slate-500 dark:text-slate-400">
@@ -846,12 +1103,15 @@ export function SubscriptionsPage() {
                 <button type="button" disabled={busy} onClick={() => bulkActivate("advanced")} className="rounded-lg border border-brand/40 bg-brand/10 px-3 py-1 font-semibold text-brand hover:bg-brand/20 disabled:opacity-50">
                   Activate Advanced
                 </button>
-                <button type="button" disabled={busy} onClick={bulkSuspend} className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-1 font-semibold text-amber-700 hover:bg-amber-100 disabled:opacity-50">
-                  Suspend
+                <button type="button" disabled={busy} onClick={() => void bulkExtendOneMonth()} className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1 font-semibold text-indigo-700 hover:bg-indigo-100 disabled:opacity-50">
+                  Extend +1 month
                 </button>
-                <button type="button" disabled={busy} onClick={bulkCancelNow} className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-1 font-semibold text-rose-700 hover:bg-rose-100 disabled:opacity-50">
-                  Cancel Now
-                </button>
+                  <button type="button" disabled={busy} onClick={requestBulkSuspend} className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-1 font-semibold text-amber-700 hover:bg-amber-100 disabled:opacity-50">
+                    Suspend
+                  </button>
+                  <button type="button" disabled={busy} onClick={requestBulkCancel} className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-1 font-semibold text-rose-700 hover:bg-rose-100 disabled:opacity-50">
+                    Cancel Now
+                  </button>
                 <button type="button" onClick={clearSelectedSchools} className="rounded-lg border border-slate-200 px-3 py-1 font-semibold text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300">
                   Clear
                 </button>
@@ -859,7 +1119,7 @@ export function SubscriptionsPage() {
             </div>
           )}
 
-          <div className="mt-3 overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
+          <div className="mt-3 flex-1 overflow-x-auto overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-800">
             {loading ? (
               <p className="p-3 text-sm text-slate-500 dark:text-slate-400">Loading schools...</p>
             ) : filteredRows.length ? (
@@ -1055,6 +1315,35 @@ export function SubscriptionsPage() {
                     />
                   </label>
                 </div>
+                <div className="mt-4 rounded-xl border border-slate-200 bg-bg p-3 dark:border-slate-800 dark:bg-slate-900">
+                  <h4 className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Plan Change Preview</h4>
+                  <div className="mt-2 grid gap-3 md:grid-cols-2">
+                    <div className="rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-950">
+                      <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Current</p>
+                      <p className="mt-1 text-sm font-semibold text-ink">{selectedRow.summary.plan.name}</p>
+                      <p className="mt-1 text-xs text-slate-600 dark:text-slate-300">Paper sets: up to {selectedRow.summary.plan.max_paper_sets}</p>
+                      <p className="text-xs text-slate-600 dark:text-slate-300">
+                        Worksheets: {selectedRow.summary.plan.allow_worksheets ? "enabled" : "locked"} | Lesson plans:{" "}
+                        {selectedRow.summary.plan.allow_lesson_plans ? "enabled" : "locked"}
+                      </p>
+                    </div>
+                    <div className="rounded-lg border border-brand/30 bg-brand/5 p-3 dark:border-brand/40 dark:bg-brand/10">
+                      <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">After Save</p>
+                      <p className="mt-1 text-sm font-semibold text-ink">{selectedUpdatePlan?.name || "-"}</p>
+                      <p className="mt-1 text-xs text-slate-600 dark:text-slate-300">
+                        Paper sets: up to {selectedUpdatePlan?.max_paper_sets ?? "-"}
+                      </p>
+                      <p className="text-xs text-slate-600 dark:text-slate-300">
+                        Worksheets: {selectedUpdatePlan?.allow_worksheets ? "enabled" : "locked"} | Lesson plans:{" "}
+                        {selectedUpdatePlan?.allow_lesson_plans ? "enabled" : "locked"}
+                      </p>
+                    </div>
+                  </div>
+                  <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                    Change detected: {selectedUpdatePlan && selectedUpdatePlan.id !== selectedRow.summary.plan.id ? "Yes" : "No"} | Status after save:{" "}
+                    {updateStatus.replace("_", " ")}
+                  </p>
+                </div>
                 <div className="mt-4 flex flex-wrap gap-2">
                   <button
                     type="submit"
@@ -1090,7 +1379,7 @@ export function SubscriptionsPage() {
                   <button
                     type="button"
                     disabled={busy || selectedRow.summary.status === "cancelled"}
-                    onClick={() => void cancelSelectedNow()}
+                    onClick={requestSingleCancel}
                     className="rounded-lg border border-rose-300 px-4 py-2 text-sm font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-60 dark:border-rose-700 dark:text-rose-300 dark:hover:bg-rose-900/20"
                   >
                     Cancel Now
@@ -1128,116 +1417,6 @@ export function SubscriptionsPage() {
                 </div>
               </form>
 
-              <div className="rounded-2xl border border-slate-200 bg-card p-4 shadow-soft dark:border-slate-800">
-                <h3 className="text-sm font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Payment History</h3>
-                <div className="mt-3 overflow-x-auto">
-                  <table className="w-full min-w-[680px] text-left text-sm">
-                    <thead>
-                      <tr className="border-b border-slate-200 text-xs uppercase text-slate-500 dark:border-slate-800 dark:text-slate-400">
-                        <th className="px-2 py-2">Created</th>
-                        <th className="px-2 py-2">Provider</th>
-                        <th className="px-2 py-2">Amount</th>
-                        <th className="px-2 py-2">Status</th>
-                        <th className="px-2 py-2">Merchant Txn</th>
-                        <th className="px-2 py-2">Action</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {paymentIntents.length ? (
-                        paymentIntents.map((intent) => (
-                          <tr key={intent.id} className="border-b border-slate-100 dark:border-slate-800/70">
-                            <td className="px-2 py-2">{formatDateTime(intent.created_at)}</td>
-                            <td className="px-2 py-2">{intent.provider}</td>
-                            <td className="px-2 py-2">PKR {Number(intent.amount_pkr || 0).toFixed(0)}</td>
-                            <td className="px-2 py-2">
-                              <span
-                                className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
-                                  intent.status === "success"
-                                    ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
-                                    : intent.status === "pending"
-                                      ? "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
-                                      : "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300"
-                                }`}
-                              >
-                                {intent.status}
-                              </span>
-                            </td>
-                            <td className="px-2 py-2">{intent.merchant_txn_id}</td>
-                            <td className="px-2 py-2">
-                              {intent.status === "pending" ? (
-                                <button
-                                  type="button"
-                                  disabled={busy}
-                                  onClick={() => void markIntentPaid(intent)}
-                                  className="rounded border border-emerald-300 px-2 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 dark:border-emerald-700 dark:text-emerald-300 dark:hover:bg-emerald-900/20"
-                                >
-                                  Mark Paid
-                                </button>
-                              ) : (
-                                <span className="text-xs text-slate-400">-</span>
-                              )}
-                            </td>
-                          </tr>
-                        ))
-                      ) : (
-                        <tr>
-                          <td className="px-2 py-3 text-slate-500 dark:text-slate-400" colSpan={6}>
-                            No payment intents yet.
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-slate-200 bg-card p-4 shadow-soft dark:border-slate-800">
-                <div className="flex items-center justify-between gap-2">
-                  <h3 className="text-sm font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Activity Log</h3>
-                  <button
-                    type="button"
-                    onClick={downloadAuditLogFile}
-                    disabled={!auditLogs.length}
-                    className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-900"
-                  >
-                    Download Log File
-                  </button>
-                </div>
-                <div className="mt-3 overflow-x-auto">
-                  <table className="w-full min-w-[680px] text-left text-sm">
-                    <thead>
-                      <tr className="border-b border-slate-200 text-xs uppercase text-slate-500 dark:border-slate-800 dark:text-slate-400">
-                        <th className="px-2 py-2">Time</th>
-                        <th className="px-2 py-2">Action</th>
-                        <th className="px-2 py-2">Actor</th>
-                        <th className="px-2 py-2">Target</th>
-                        <th className="px-2 py-2">Details</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {auditLogs.length ? (
-                        auditLogs.map((log) => (
-                          <tr key={log.id} className="border-b border-slate-100 dark:border-slate-800/70">
-                            <td className="px-2 py-2">{formatDateTime(log.created_at)}</td>
-                            <td className="px-2 py-2 font-medium text-ink">{log.action}</td>
-                            <td className="px-2 py-2">{log.actor_name || "System"}</td>
-                            <td className="px-2 py-2">{`${log.target_type || "-"}:${log.target_id || "-"}`}</td>
-                            <td className="max-w-[300px] truncate px-2 py-2 text-xs text-slate-500 dark:text-slate-400">
-                              {log.details ? JSON.stringify(log.details) : "{}"}
-                            </td>
-                          </tr>
-                        ))
-                      ) : (
-                        <tr>
-                          <td className="px-2 py-3 text-slate-500 dark:text-slate-400" colSpan={5}>
-                            No activity logs yet.
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
             </>
           ) : (
             <div className="rounded-2xl border border-slate-200 bg-card p-6 text-sm text-slate-500 shadow-soft dark:border-slate-800 dark:text-slate-400">
@@ -1287,14 +1466,25 @@ export function SubscriptionsPage() {
             </label>
             <label className="text-sm text-slate-700 dark:text-slate-300">
               Temporary Password
-              <input
-                type="text"
-                className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-900"
-                value={newUserPassword}
-                onChange={(e) => setNewUserPassword(e.target.value)}
-                placeholder="client123"
-                required
-              />
+              <div className="mt-1 flex gap-2">
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-900"
+                  value={newUserPassword}
+                  onChange={(e) => setNewUserPassword(e.target.value)}
+                  placeholder="Auto-generated secure password"
+                  required
+                />
+                <button
+                  type="button"
+                  onClick={() => setNewUserPassword(generateTemporaryPassword())}
+                  className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                >
+                  Generate
+                </button>
+              </div>
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Share this only once, then ask client to change it from Settings.</p>
             </label>
           </div>
 
@@ -1419,6 +1609,130 @@ export function SubscriptionsPage() {
           </div>
         </form>
       </section>
+
+      {selectedRow ? (
+        <section className="grid gap-6 xl:grid-cols-2">
+          <div className="rounded-2xl border border-slate-200 bg-card p-4 shadow-soft dark:border-slate-800">
+            <h3 className="text-sm font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Payment History</h3>
+            <div className="mt-3 overflow-x-auto">
+              <table className="w-full min-w-[680px] text-left text-sm">
+                <thead>
+                  <tr className="border-b border-slate-200 text-xs uppercase text-slate-500 dark:border-slate-800 dark:text-slate-400">
+                    <th className="px-2 py-2">Created</th>
+                    <th className="px-2 py-2">Provider</th>
+                    <th className="px-2 py-2">Amount</th>
+                    <th className="px-2 py-2">Status</th>
+                    <th className="px-2 py-2">Merchant Txn</th>
+                    <th className="px-2 py-2">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {paymentIntents.length ? (
+                    paymentIntents.map((intent) => (
+                      <tr key={intent.id} className="border-b border-slate-100 dark:border-slate-800/70">
+                        <td className="px-2 py-2">{formatDateTime(intent.created_at)}</td>
+                        <td className="px-2 py-2">{intent.provider}</td>
+                        <td className="px-2 py-2">PKR {Number(intent.amount_pkr || 0).toFixed(0)}</td>
+                        <td className="px-2 py-2">
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                              intent.status === "success"
+                                ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
+                                : intent.status === "pending"
+                                  ? "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+                                  : "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                            }`}
+                          >
+                            {intent.status}
+                          </span>
+                        </td>
+                        <td className="px-2 py-2">{intent.merchant_txn_id}</td>
+                        <td className="px-2 py-2">
+                          {intent.status === "pending" ? (
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => void markIntentPaid(intent)}
+                              className="rounded border border-emerald-300 px-2 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 dark:border-emerald-700 dark:text-emerald-300 dark:hover:bg-emerald-900/20"
+                            >
+                              Mark Paid
+                            </button>
+                          ) : (
+                            <span className="text-xs text-slate-400">-</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td className="px-2 py-3 text-slate-500 dark:text-slate-400" colSpan={6}>
+                        No payment intents yet.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-slate-200 bg-card p-4 shadow-soft dark:border-slate-800">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-sm font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Activity Log</h3>
+              <button
+                type="button"
+                onClick={downloadAuditLogFile}
+                disabled={!auditLogs.length}
+                className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-900"
+              >
+                Download Log File
+              </button>
+            </div>
+            <div className="mt-3 overflow-x-auto">
+              <table className="w-full min-w-[680px] text-left text-sm">
+                <thead>
+                  <tr className="border-b border-slate-200 text-xs uppercase text-slate-500 dark:border-slate-800 dark:text-slate-400">
+                    <th className="px-2 py-2">Time</th>
+                    <th className="px-2 py-2">Action</th>
+                    <th className="px-2 py-2">Actor</th>
+                    <th className="px-2 py-2">Target</th>
+                    <th className="px-2 py-2">Details</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {auditLogs.length ? (
+                    auditLogs.map((log) => (
+                      <tr key={log.id} className="border-b border-slate-100 dark:border-slate-800/70">
+                        <td className="px-2 py-2">{formatDateTime(log.created_at)}</td>
+                        <td className="px-2 py-2 font-medium text-ink">{log.action}</td>
+                        <td className="px-2 py-2">{log.actor_name || "System"}</td>
+                        <td className="px-2 py-2">{`${log.target_type || "-"}:${log.target_id || "-"}`}</td>
+                        <td className="max-w-[300px] truncate px-2 py-2 text-xs text-slate-500 dark:text-slate-400">
+                          {log.details ? JSON.stringify(log.details) : "{}"}
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td className="px-2 py-3 text-slate-500 dark:text-slate-400" colSpan={5}>
+                        No activity logs yet.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      ) : null}
+      <ConfirmModal
+        open={Boolean(confirmModalState)}
+        title={confirmModalState?.title || "Confirm action"}
+        message={confirmModalState?.message || ""}
+        confirmLabel={confirmModalState?.confirmLabel || "Confirm"}
+        loading={busy}
+        onCancel={() => setConfirmAction(null)}
+        onConfirm={() => void confirmCurrentAction()}
+      />
     </div>
   );
 }
