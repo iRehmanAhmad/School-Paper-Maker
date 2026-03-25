@@ -1,5 +1,5 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { useState, useCallback, useEffect } from "react";
+import { Fragment, useState, useCallback, useEffect } from "react";
 import { useAppStore } from "@/store/useAppStore";
 import { getSubscriptionSummary } from "@/services/repositories";
 import { BookOpen, ChartPie, CreditCard, DatabaseZap, FileCog, FileOutput, Folder, GraduationCap, LayoutDashboard, ListChecks, LogOut, Settings, Shapes } from "lucide-react";
@@ -35,8 +35,9 @@ export function AppLayout() {
 
   useEffect(() => {
     async function loadSummary() {
-      if (!profile?.school_id) {
+      if (!profile?.school_id || profile.role !== "teacher") {
         setPlanLabel("");
+        setPlanActive(true);
         return;
       }
       try {
@@ -66,7 +67,7 @@ export function AppLayout() {
           <div className="mt-4 rounded-xl bg-bg dark:bg-slate-800/50 p-3 text-sm">
             <p className="font-semibold text-ink">{profile?.full_name ?? "Guest"}</p>
             <p className="text-slate-500 dark:text-slate-400">{profile?.role ?? "teacher"}</p>
-            {planLabel && (
+            {profile?.role === "teacher" && planLabel && (
               <p className={`mt-2 inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${planActive ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
                 {planLabel} {planActive ? "Active" : "Inactive"}
               </p>
@@ -76,19 +77,26 @@ export function AppLayout() {
             {navItems.map((item) => {
               const Icon = item.icon;
               return (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  className={({ isActive }) =>
-                    `flex items-center gap-2 rounded-lg px-3 py-2 text-sm transition-all ${isActive
-                      ? "bg-brand text-white shadow-md shadow-brand/20"
-                      : "text-slate-600 dark:text-slate-400 hover:bg-bg dark:hover:bg-slate-800/80 hover:text-brand"
-                    }`
-                  }
-                >
-                  <Icon size={16} />
-                  {item.label}
-                </NavLink>
+                <Fragment key={item.to}>
+                  {profile?.role === "admin" && item.to === "/subscriptions" ? (
+                    <div className="my-2 border-t border-slate-200 dark:border-slate-700/70" />
+                  ) : null}
+                  <NavLink
+                    to={item.to}
+                    className={({ isActive }) =>
+                      `flex items-center gap-2 rounded-lg px-3 py-2 text-sm transition-all ${isActive
+                        ? "bg-brand text-white shadow-md shadow-brand/20"
+                        : "text-slate-600 dark:text-slate-400 hover:bg-bg dark:hover:bg-slate-800/80 hover:text-brand"
+                      }`
+                    }
+                  >
+                    <Icon size={16} />
+                    {item.label}
+                  </NavLink>
+                  {item.to === "/dashboard" ? (
+                    <div className="my-2 border-t border-slate-200 dark:border-slate-700/70" />
+                  ) : null}
+                </Fragment>
               );
             })}
           </nav>

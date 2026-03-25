@@ -15,8 +15,7 @@ export function ContextBreadcrumbs({ items }: ContextBreadcrumbsProps) {
   return (
     <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
       <div className="mb-2 flex items-center justify-between">
-        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Context Path</p>
-        <p className="text-[10px] font-semibold text-slate-400">Click a pill to jump, x to clear</p>
+        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Current Scope</p>
       </div>
       <div className="flex flex-wrap items-center gap-2 text-xs">
         {items.map((item, index) => {

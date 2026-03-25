@@ -16,6 +16,7 @@ import { addLessonPlanWithBlocks } from "./lessonPlanService";
 import { addQuestions } from "./questionService";
 import { assertCanGenerateArtifact } from "./subscriptionService";
 import { addWorksheetWithItems } from "./worksheetService";
+import { searchContentChunks } from "./contentService";
 
 type GenerationJobFilters = {
   artifact?: ArtifactType;
@@ -121,6 +122,19 @@ export async function getGenerationJobs(schoolId: string, filters?: GenerationJo
 
 export async function queueGenerationJob(input: QueueGenerationJobInput) {
   await assertCanGenerateArtifact(input.school_id, input.artifact);
+  const chunkRows = await searchContentChunks({
+    school_id: input.school_id,
+    exam_body_id: input.exam_body_id,
+    class_id: input.class_id,
+    subject_id: input.subject_id,
+    chapter_id: input.chapter_id,
+    topic_id: input.topic_id || undefined,
+    limit: 1,
+  });
+  if (!chunkRows.length) {
+    throw new Error("No ingested content available for this chapter/topic. Upload and ingest source first.");
+  }
+
   if (canUseSupabase()) {
     const payload = {
       ...input,
@@ -255,6 +269,47 @@ export async function reviewGenerationCandidate(candidateId: string, action: Rev
   row.approved_at = approvedAt;
   writeLocal(DB.generationCandidates, rows);
   return row;
+}
+
+export async function deleteGenerationCandidate(candidateId: string) {
+  const id = String(candidateId || "").trim();
+  if (!id) return 0;
+  if (canUseSupabase()) {
+    const { error, count } = await supabase
+      .from("generation_candidates")
+      .delete({ count: "exact" })
+      .eq("id", id);
+    if (error) throw error;
+    return count ?? 0;
+  }
+  const rows = readLocal<GenerationCandidate>(DB.generationCandidates);
+  const next = rows.filter((row) => row.id !== id);
+  const deleted = rows.length - next.length;
+  if (deleted > 0) {
+    writeLocal(DB.generationCandidates, next);
+  }
+  return deleted;
+}
+
+export async function deleteGenerationCandidates(candidateIds: string[]) {
+  const ids = Array.from(new Set((candidateIds || []).map((id) => String(id || "").trim()).filter(Boolean)));
+  if (!ids.length) return 0;
+  if (canUseSupabase()) {
+    const { error, count } = await supabase
+      .from("generation_candidates")
+      .delete({ count: "exact" })
+      .in("id", ids);
+    if (error) throw error;
+    return count ?? 0;
+  }
+  const rows = readLocal<GenerationCandidate>(DB.generationCandidates);
+  const idSet = new Set(ids);
+  const next = rows.filter((row) => !idSet.has(row.id));
+  const deleted = rows.length - next.length;
+  if (deleted > 0) {
+    writeLocal(DB.generationCandidates, next);
+  }
+  return deleted;
 }
 
 async function getCandidateById(candidateId: string) {

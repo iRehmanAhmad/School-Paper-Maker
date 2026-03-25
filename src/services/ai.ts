@@ -1,7 +1,7 @@
 import { getAISettings, updateKeyStatus } from "@/services/aiSettings";
 import { type AIProvider, type AISettings, type AIKeyEntry } from "@/types/ai";
 import { canUseSupabase, supabase } from "@/services/supabase";
-import type { BloomLevel, Difficulty, QuestionLevel, QuestionType } from "@/types/domain";
+import type { ArtifactType, BloomLevel, Difficulty, QuestionLevel, QuestionType } from "@/types/domain";
 
 export type AIGeneratedQuestion = {
   question_text: string;
@@ -38,6 +38,8 @@ export type AISubjectOutlineChapter = {
   title: string;
   topics: string[];
 };
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function extractUnitsFromText(text: string) {
   const lines = text
@@ -418,37 +420,33 @@ async function callOpenAICompatible(baseUrl: string, apiKey: string, model: stri
 }
 
 async function callGemini(apiKey: string, model: string, prompt: string, keyId?: string) {
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.3 },
-    }),
-  });
-
+  const result = await requestGeminiContent(apiKey, model || "gemini-1.5-flash", prompt, 1500, false);
   if (keyId) {
-    if (response.ok) {
+    if (result.ok) {
       const settings = getAISettings();
       const currentEntry = settings.keyPool.find(k => k.id === keyId);
       updateKeyStatus(keyId, {
         usageCount: (currentEntry?.usageCount || 0) + 1,
         lastUsed: new Date().toISOString(),
-        isExhausted: false
+        isExhausted: false,
+        lastError: undefined,
       });
-    } else if (response.status === 429) {
-      updateKeyStatus(keyId, { isExhausted: true, quotaRemaining: "Quota Exceeded" });
+    } else if (result.status === 429) {
+      updateKeyStatus(keyId, { isExhausted: true, quotaRemaining: "Quota Exceeded", lastError: "Rate Limited" });
+    } else if (result.status === 401 || result.status === 403) {
+      updateKeyStatus(keyId, { lastError: "Invalid Key (401/403)" });
+    } else if (result.status === 404) {
+      updateKeyStatus(keyId, { lastError: `Model not found (${result.model || "unknown"})` });
+    } else if (result.status) {
+      updateKeyStatus(keyId, { lastError: `HTTP ${result.status}` });
     }
   }
 
-  if (!response.ok) {
-    throw new Error(`Gemini error: ${await response.text()}`);
+  if (!result.ok) {
+    throw new Error(`Gemini error: HTTP ${result.status || 0}`);
   }
 
-  const data = await response.json();
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  const text = result.content;
   if (!text) {
     throw new Error("Gemini returned empty response");
   }
@@ -496,97 +494,85 @@ function mockQuestions(input: AIInput): AIGeneratedQuestion[] {
 }
 
 async function callProvider(provider: AIProvider, settings: AISettings, prompt: string, keyEntry: AIKeyEntry): Promise<AIGeneratedQuestion[]> {
-  const model = settings.model || "";
-  const apiKey = keyEntry.key;
-  const keyId = keyEntry.id;
-
-  if (provider === "groq") {
-    return callOpenAICompatible("https://api.groq.com/openai/v1/chat/completions", apiKey, model || "llama-3.3-70b-versatile", prompt, undefined, keyId);
+  const result = await requestProviderContent(provider, settings, keyEntry, {
+    prompt,
+    maxTokens: 1500,
+    temperature: 0.3,
+    forceJson: true,
+  });
+  applyProviderResultStatus(keyEntry, result);
+  if (!result.ok) {
+    throw new Error(`Provider request failed (${result.status || 0}).`);
   }
+  const parsed = extractJsonObject(result.content) as { questions?: AIGeneratedQuestion[] };
+  return parsed.questions || [];
+}
 
-  if (provider === "openrouter") {
-    return callOpenAICompatible(
-      "https://openrouter.ai/api/v1/chat/completions",
-      apiKey,
-      model || "meta-llama/llama-3.3-70b-instruct:free",
-      prompt,
-      { "HTTP-Referer": window.location.origin, "X-Title": "Paper Generator" },
-      keyId
-    );
-  }
+const PROVIDER_KEY_FIELD_MAP: Partial<Record<AIProvider, keyof AISettings>> = {
+  groq: "groqApiKey",
+  gemini: "geminiApiKey",
+  deepseek: "deepseekApiKey",
+  qwen: "qwenApiKey",
+  siliconflow: "siliconflowApiKey",
+  openrouter: "openrouterApiKey",
+  together: "togetherApiKey",
+  openai: "openaiApiKey",
+  anthropic: "anthropicApiKey",
+};
 
-  if (provider === "together") {
-    return callOpenAICompatible("https://api.together.xyz/v1/chat/completions", apiKey, model || "meta-llama/Llama-3.3-70B-Instruct-Turbo", prompt, undefined, keyId);
-  }
+function buildRuntimeKeyChain(settings: AISettings, providerPriority: AIProvider[]) {
+  const pool = Array.isArray(settings.keyPool) ? settings.keyPool : [];
+  const priorityProviders = Array.from(new Set([...providerPriority, settings.provider]));
 
-  if (provider === "openai") {
-    return callOpenAICompatible("https://api.openai.com/v1/chat/completions", apiKey, model || "gpt-4o-mini", prompt, undefined, keyId);
-  }
+  const seededFromProviderFields: AIKeyEntry[] = priorityProviders
+    .map((provider) => {
+      const fieldName = PROVIDER_KEY_FIELD_MAP[provider];
+      if (!fieldName) return null;
+      const key = String(settings[fieldName] || "").trim();
+      if (!key) return null;
+      const existsInPool = pool.some(
+        (entry) => entry.provider === provider && String(entry.key || "").trim() === key,
+      );
+      if (existsInPool) return null;
+      return {
+        id: `field-${provider}`,
+        provider,
+        key,
+        label: `${provider} Primary`,
+        usageCount: 0,
+        isExhausted: false,
+        model: provider === settings.provider ? settings.model : "",
+      } as AIKeyEntry;
+    })
+    .filter((entry): entry is AIKeyEntry => Boolean(entry));
 
-  if (provider === "gemini") {
-    return callGemini(apiKey, model || "gemini-1.5-flash", prompt, keyId);
-  }
+  const combined = [...pool, ...seededFromProviderFields].filter((entry) => String(entry.key || "").trim());
+  const usable = combined.filter((entry) => !entry.isExhausted);
+  const candidate = usable.length ? usable : combined;
 
-  if (provider === "deepseek") {
-    return callOpenAICompatible("https://api.deepseek.com/v1/chat/completions", apiKey, model || "deepseek-chat", prompt, undefined, keyId);
-  }
-
-  if (provider === "qwen") {
-    return callOpenAICompatible("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", apiKey, model || "qwen-plus", prompt, undefined, keyId);
-  }
-
-  if (provider === "siliconflow") {
-    return callOpenAICompatible("https://api.siliconflow.cn/v1/chat/completions", apiKey, model || "deepseek-ai/DeepSeek-V3", prompt, undefined, keyId);
-  }
-
-  if (provider === "anthropic" && settings.anthropicApiKey) {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": settings.anthropicApiKey,
-        "anthropic-version": "2023-06-01",
-        "dangerously-allow-browser": "true"
-      },
-      body: JSON.stringify({
-        model: model || "claude-3-5-sonnet-20240620",
-        max_tokens: 4096,
-        messages: [{ role: "user", content: prompt }]
-      })
-    });
-    const data = await response.json();
-    const content = data?.content?.[0]?.text;
-    if (!content) throw new Error("Anthropic returned empty response");
-    const cleaned = String(content).replace(/```json|```/g, "").trim();
-    const parsed = JSON.parse(cleaned) as { questions?: AIGeneratedQuestion[] };
-    return parsed.questions || [];
-  }
-
-  throw new Error(`Provider ${provider} not configured or recognized`);
+  return candidate.sort((a, b) => {
+    if (settings.activeKeyId) {
+      if (a.id === settings.activeKeyId && b.id !== settings.activeKeyId) return -1;
+      if (a.id !== settings.activeKeyId && b.id === settings.activeKeyId) return 1;
+    }
+    if (a.provider === settings.provider && b.provider !== settings.provider) return -1;
+    if (a.provider !== settings.provider && b.provider === settings.provider) return 1;
+    const aIdx = providerPriority.indexOf(a.provider);
+    const bIdx = providerPriority.indexOf(b.provider);
+    const aRank = aIdx === -1 ? 999 : aIdx;
+    const bRank = bIdx === -1 ? 999 : bIdx;
+    return aRank - bRank;
+  });
 }
 
 async function tryClientSideProviders(input: AIInput): Promise<AIGeneratedQuestion[] | null> {
   const settings = getAISettings();
   const prompt = buildPrompt(input);
 
-  const providers: AIProvider[] = [
+  const providerPriority: AIProvider[] = [
     "groq", "gemini", "deepseek", "qwen", "siliconflow", "openrouter", "together", "openai", "anthropic"
   ];
-  const providerPriority = providers;
-
-  const keyChain = [...settings.keyPool]
-    .filter(k => !k.isExhausted)
-    .sort((a, b) => {
-      if (settings.activeKeyId) {
-        if (a.id === settings.activeKeyId && b.id !== settings.activeKeyId) return -1;
-        if (a.id !== settings.activeKeyId && b.id === settings.activeKeyId) return 1;
-      }
-      if (a.provider === settings.provider && b.provider !== settings.provider) return -1;
-      if (a.provider !== settings.provider && b.provider === settings.provider) return 1;
-      const aIdx = providerPriority.indexOf(a.provider);
-      const bIdx = providerPriority.indexOf(b.provider);
-      return aIdx - bIdx;
-    });
+  const keyChain = buildRuntimeKeyChain(settings, providerPriority);
 
   if (!keyChain.length) return null;
 
@@ -665,6 +651,920 @@ export async function generateQuestionsFromPdf(input: AIInput): Promise<AIGenera
   return mockQuestions(input);
 }
 
+type AIChunkArtifactInput = {
+  artifact: ArtifactType;
+  contextText: string;
+  contextLabel?: string;
+  count?: number;
+  questionType?: QuestionType;
+  difficulty?: Difficulty;
+  bloomLevel?: BloomLevel | "";
+  instructions?: string;
+};
+
+const geminiModelCache = new Map<string, string[]>();
+const geminiBadModelCache = new Map<string, Set<string>>();
+
+function uniqStrings(values: string[]) {
+  return Array.from(new Set(values.filter(Boolean)));
+}
+
+function normalizeGeminiModelName(value: string) {
+  const clean = String(value || "").trim();
+  if (!clean) return "";
+  return clean.replace(/^models\//i, "");
+}
+
+function preferredGeminiModelVariants(preferred: string) {
+  const clean = normalizeGeminiModelName(preferred);
+  if (!clean) return [] as string[];
+  return uniqStrings([
+    clean,
+    clean.endsWith("-latest") ? clean.replace(/-latest$/i, "") : `${clean}-latest`,
+  ]);
+}
+
+async function discoverGeminiModels(apiKey: string) {
+  const cached = geminiModelCache.get(apiKey);
+  if (cached?.length) {
+    return cached;
+  }
+  try {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+    if (!response.ok) {
+      return [] as string[];
+    }
+    const data = await response.json();
+    const models = Array.isArray(data?.models) ? data.models : [];
+    const discovered = models
+      .filter((row: any) => {
+        const methods = Array.isArray(row?.supportedGenerationMethods) ? row.supportedGenerationMethods : [];
+        return methods.includes("generateContent") && String(row?.name || "").toLowerCase().includes("gemini");
+      })
+      .map((row: any) => normalizeGeminiModelName(String(row?.name || "")))
+      .filter(Boolean);
+    const uniqueDiscovered = uniqStrings(discovered);
+    geminiModelCache.set(apiKey, uniqueDiscovered);
+    return uniqueDiscovered;
+  } catch {
+    return [] as string[];
+  }
+}
+
+async function buildGeminiModelCandidates(apiKey: string, preferredModel: string) {
+  const discovered = await discoverGeminiModels(apiKey);
+  const bad = geminiBadModelCache.get(apiKey) || new Set<string>();
+  const fallback = [
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+  ];
+  return uniqStrings([
+    ...discovered,
+    ...preferredGeminiModelVariants(preferredModel),
+    ...fallback,
+  ]).filter((model) => !bad.has(model));
+}
+
+type GeminiRequestResult = {
+  ok: boolean;
+  status: number;
+  content: string;
+  model: string;
+};
+
+type ProviderRequestResult = {
+  ok: boolean;
+  status: number;
+  content: string;
+  model: string;
+  errorText?: string;
+};
+
+type ProviderRequestInput = {
+  prompt?: string;
+  messages?: Array<{ role: "system" | "user" | "assistant"; content: string }>;
+  temperature?: number;
+  maxTokens?: number;
+  forceJson?: boolean;
+  debug?: boolean;
+};
+
+const OPENAI_COMPATIBLE_ENDPOINTS: Partial<Record<AIProvider, string>> = {
+  groq: "https://api.groq.com/openai/v1/chat/completions",
+  openai: "https://api.openai.com/v1/chat/completions",
+  openrouter: "https://openrouter.ai/api/v1/chat/completions",
+  deepseek: "https://api.deepseek.com/v1/chat/completions",
+  qwen: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+  siliconflow: "https://api.siliconflow.cn/v1/chat/completions",
+  together: "https://api.together.xyz/v1/chat/completions",
+};
+
+const PROVIDER_MODEL_DEFAULTS: Record<AIProvider, string[]> = {
+  groq: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
+  gemini: ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-latest"],
+  openrouter: ["meta-llama/llama-3.3-70b-instruct:free", "google/gemma-2-9b-it:free"],
+  together: ["meta-llama/Llama-3.3-70B-Instruct-Turbo", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo"],
+  openai: ["gpt-4o-mini", "gpt-4.1-mini"],
+  deepseek: ["deepseek-chat", "deepseek-reasoner"],
+  qwen: ["qwen-plus", "qwen-turbo"],
+  siliconflow: ["deepseek-ai/DeepSeek-V3", "Qwen/Qwen2.5-7B-Instruct"],
+  anthropic: ["claude-3-5-sonnet-20240620", "claude-3-5-haiku-20241022"],
+  supabase: ["ai-generate-questions"],
+};
+
+function normalizeMessages(request: ProviderRequestInput) {
+  if (Array.isArray(request.messages) && request.messages.length) {
+    return request.messages
+      .filter((row) => row && row.content?.trim())
+      .map((row) => ({ role: row.role, content: row.content.trim() }));
+  }
+  return [{ role: "user" as const, content: String(request.prompt || "").trim() }];
+}
+
+function flattenMessages(messages: Array<{ role: "system" | "user" | "assistant"; content: string }>) {
+  return messages.map((row) => `${row.role.toUpperCase()}: ${row.content}`).join("\n\n");
+}
+
+function buildProviderModelCandidates(provider: AIProvider, settings: AISettings, keyEntry: AIKeyEntry) {
+  return uniqStrings([
+    (keyEntry.model || "").trim(),
+    keyEntry.provider === settings.provider ? (settings.model || "").trim() : "",
+    ...(PROVIDER_MODEL_DEFAULTS[provider] || []),
+  ]);
+}
+
+function shouldTryNextModel(status: number, errorText: string) {
+  if ([400, 404, 422].includes(status)) return true;
+  const lower = (errorText || "").toLowerCase();
+  return (
+    lower.includes("model") &&
+    (
+      lower.includes("not found") ||
+      lower.includes("does not exist") ||
+      lower.includes("unknown") ||
+      lower.includes("unsupported") ||
+      lower.includes("invalid") ||
+      lower.includes("unavailable")
+    )
+  );
+}
+
+function parseOpenAIContent(data: any) {
+  const raw = data?.choices?.[0]?.message?.content;
+  if (typeof raw === "string") return raw;
+  if (Array.isArray(raw)) {
+    return raw
+      .map((part: any) => (typeof part?.text === "string" ? part.text : ""))
+      .filter(Boolean)
+      .join("\n");
+  }
+  return "";
+}
+
+async function requestOpenAICompatibleContent(
+  provider: AIProvider,
+  apiKey: string,
+  models: string[],
+  request: ProviderRequestInput,
+): Promise<ProviderRequestResult> {
+  const url = OPENAI_COMPATIBLE_ENDPOINTS[provider];
+  if (!url) {
+    return { ok: false, status: 0, content: "", model: "", errorText: `Unsupported provider: ${provider}` };
+  }
+  const messages = normalizeMessages(request);
+  const maxTokens = request.maxTokens ?? 1500;
+  const temperature = request.temperature ?? 0.1;
+
+  let finalStatus = 0;
+  let finalModel = models[0] || "";
+  let finalError = "";
+
+  for (const model of models) {
+    finalModel = model;
+    
+    const retryCount = 1; // Only 1 retry for OpenAI-compatible to keep it snappy, but handles 429
+    for (let i = 0; i < retryCount + 1; i += 1) {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+          ...(provider === "openrouter" ? { "HTTP-Referer": window.location.origin, "X-Title": "Paper Generator" } : {}),
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          temperature,
+          max_tokens: maxTokens,
+          response_format: request.forceJson && (provider === "openai" || provider === "openrouter") ? { type: "json_object" } : undefined,
+        }),
+      });
+
+      finalStatus = response.status;
+      if (response.ok) {
+        const data = await response.json();
+        const content = parseOpenAIContent(data);
+        return { ok: true, status: response.status, content, model };
+      }
+
+      const errorText = await response.text();
+      finalError = errorText;
+
+      if (response.status === 429 || response.status === 503) {
+        if (i < retryCount) {
+          const waitTime = Math.pow(2, i + 1) * 2000 + Math.random() * 1000;
+          await sleep(waitTime);
+          continue;
+        }
+      }
+
+      if (!shouldTryNextModel(response.status, errorText)) {
+        if (response.status === 401 || response.status === 403 || response.status === 429 || response.status === 413) {
+          break;
+        }
+      }
+      break; 
+    }
+  }
+
+  return { ok: false, status: finalStatus, content: "", model: finalModel, errorText: finalError };
+}
+
+async function requestAnthropicContent(
+  apiKey: string,
+  models: string[],
+  request: ProviderRequestInput,
+): Promise<ProviderRequestResult> {
+  const allMessages = normalizeMessages(request);
+  const system = allMessages
+    .filter((row) => row.role === "system")
+    .map((row) => row.content)
+    .join("\n\n")
+    .trim();
+  const messages = allMessages
+    .filter((row) => row.role !== "system")
+    .map((row) => ({ role: row.role === "assistant" ? "assistant" : "user", content: row.content }));
+  const maxTokens = request.maxTokens ?? 1500;
+
+  let finalStatus = 0;
+  let finalModel = models[0] || "";
+  let finalError = "";
+
+  for (const model of models) {
+    finalModel = model;
+    
+    const retryCount = 3;
+    for (let i = 0; i < retryCount; i += 1) {
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "dangerously-allow-browser": "true",
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: maxTokens,
+          ...(system ? { system } : {}),
+          messages,
+        }),
+      });
+
+      finalStatus = response.status;
+      if (response.ok) {
+        const data = await response.json();
+        const content = Array.isArray(data?.content)
+          ? data.content
+              .map((item: any) => (item?.type === "text" ? String(item?.text || "") : ""))
+              .filter(Boolean)
+              .join("\n")
+          : "";
+        return { ok: true, status: response.status, content, model };
+      }
+
+      const errorText = await response.text();
+      finalError = errorText;
+
+      if (response.status === 429 || response.status === 503) {
+        if (i < retryCount - 1) {
+          const waitTime = Math.pow(2, i + 1) * 2000 + Math.random() * 1000;
+          await sleep(waitTime);
+          continue;
+        }
+      }
+
+      if (!shouldTryNextModel(response.status, errorText)) {
+        if (response.status === 401 || response.status === 403 || response.status === 429 || response.status === 413) {
+          break;
+        }
+      }
+      break; 
+    }
+  }
+
+  return { ok: false, status: finalStatus, content: "", model: finalModel, errorText: finalError };
+}
+
+async function requestProviderContent(
+  provider: AIProvider,
+  settings: AISettings,
+  keyEntry: AIKeyEntry,
+  request: ProviderRequestInput,
+): Promise<ProviderRequestResult> {
+  const apiKey = (keyEntry.key || "").trim();
+  if (!apiKey) {
+    return { ok: false, status: 0, content: "", model: "", errorText: "Missing API key" };
+  }
+
+  const models = buildProviderModelCandidates(provider, settings, keyEntry);
+  if (!models.length) {
+    return { ok: false, status: 0, content: "", model: "", errorText: "No model configured" };
+  }
+
+  if (provider === "gemini") {
+    const prompt = request.prompt || flattenMessages(normalizeMessages(request));
+    const result = await requestGeminiContent(
+      apiKey,
+      models[0] || "gemini-1.5-flash",
+      prompt,
+      request.maxTokens ?? 1500,
+      Boolean(request.debug),
+      Boolean(request.forceJson),
+    );
+    return { ...result };
+  }
+
+  if (provider === "anthropic") {
+    return requestAnthropicContent(apiKey, models, request);
+  }
+
+  if (OPENAI_COMPATIBLE_ENDPOINTS[provider]) {
+    return requestOpenAICompatibleContent(provider, apiKey, models, request);
+  }
+
+  return { ok: false, status: 0, content: "", model: "", errorText: `Provider ${provider} is not supported` };
+}
+
+function applyProviderResultStatus(keyEntry: AIKeyEntry, result: ProviderRequestResult) {
+  const keyId = keyEntry.id;
+  if (result.ok) {
+    updateKeyStatus(keyId, {
+      usageCount: (keyEntry.usageCount || 0) + 1,
+      lastUsed: new Date().toISOString(),
+      lastError: undefined,
+      isExhausted: false,
+    });
+    return;
+  }
+
+  if (result.status === 429) {
+    updateKeyStatus(keyId, { isExhausted: true, quotaRemaining: "Rate Limited", lastError: "Rate Limited" });
+  } else if (result.status === 401 || result.status === 403) {
+    updateKeyStatus(keyId, { lastError: "Invalid Key (401/403)" });
+  } else if (result.status === 404 || shouldTryNextModel(result.status, result.errorText || "")) {
+    updateKeyStatus(keyId, { lastError: `Model not found (${result.model || "unknown"})` });
+  } else if (result.status === 413) {
+    updateKeyStatus(keyId, { lastError: "Request too large" });
+  } else if (result.status) {
+    updateKeyStatus(keyId, { lastError: `HTTP ${result.status}` });
+  }
+}
+
+async function requestGeminiContent(
+  apiKey: string,
+  preferredModel: string,
+  prompt: string,
+  maxOutputTokens: number,
+  debug = false,
+  forceJson = false,
+): Promise<GeminiRequestResult> {
+  const modelCandidates = await buildGeminiModelCandidates(apiKey, preferredModel);
+  let finalStatus = 0;
+  let finalModel = "";
+
+  const callUrl = async (url: string) => {
+    if (debug) {
+      console.log(`[AI Request] Gemini URL: ${url.replace(apiKey, "REDACTED")}`);
+    }
+    return fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.1,
+          maxOutputTokens,
+          ...(forceJson ? { response_mime_type: "application/json", responseMimeType: "application/json" } : {}),
+        },
+      }),
+    });
+  };
+
+  for (const candidate of modelCandidates) {
+    finalModel = candidate;
+    const v1betaUrl = `https://generativelanguage.googleapis.com/v1beta/models/${candidate}:generateContent?key=${apiKey}`;
+    const v1Url = `https://generativelanguage.googleapis.com/v1/models/${candidate}:generateContent?key=${apiKey}`;
+
+    const retryCount = 3;
+    for (let i = 0; i < retryCount; i += 1) {
+      let response = await callUrl(v1betaUrl);
+      finalStatus = response.status;
+
+      if (!response.ok && response.status === 404) {
+        response = await callUrl(v1Url);
+        finalStatus = response.status;
+      }
+
+      if (response.ok) {
+        const data = await response.json();
+        return {
+          ok: true,
+          status: response.status,
+          content: data?.candidates?.[0]?.content?.parts?.[0]?.text || "",
+          model: candidate,
+        };
+      }
+
+      // Handle Rate Limits / Downtime with Exponential Backoff
+      if (response.status === 429 || response.status === 503) {
+        if (i < retryCount - 1) {
+          const waitTime = Math.pow(2, i + 1) * 1500 + Math.random() * 1000;
+          if (debug) console.warn(`[AI Gemini] ${response.status} detected. Retrying in ${Math.round(waitTime)}ms... (Attempt ${i + 1}/${retryCount})`);
+          await sleep(waitTime);
+          continue;
+        }
+        break; // Max retries hit or fatal error
+      }
+
+      if (response.status === 401 || response.status === 403) {
+        break;
+      }
+      
+      // If it's another error (like 500 or unknown 4xx), don't retry here, try next model candidate
+      break; 
+    }
+  }
+
+  return { ok: false, status: finalStatus, content: "", model: finalModel };
+}
+
+function sanitizeJsonText(value: string) {
+  return String(value || "")
+    .replace(/^\uFEFF/, "")
+    .replace(/```json|```/gi, "")
+    .replace(/[“”]/g, "\"")
+    .replace(/[‘’]/g, "'")
+    .replace(/,\s*([}\]])/g, "$1")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "")
+    .trim();
+}
+
+function extractFirstBalancedObject(text: string) {
+  const input = String(text || "");
+  let start = -1;
+  let curly = 0;
+  let square = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (ch === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === "\"") {
+      inString = true;
+      continue;
+    }
+
+    if (ch === "{") {
+      if (start === -1) start = i;
+      curly += 1;
+      continue;
+    }
+    if (ch === "}") {
+      curly -= 1;
+      if (start !== -1 && curly === 0 && square === 0) {
+        return input.slice(start, i + 1);
+      }
+      continue;
+    }
+    if (start !== -1 && ch === "[") {
+      square += 1;
+      continue;
+    }
+    if (start !== -1 && ch === "]") {
+      square -= 1;
+      continue;
+    }
+  }
+  return "";
+}
+
+function tryParseJson(value: string) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function extractJsonObject(raw: string) {
+  const cleaned = sanitizeJsonText(raw);
+  const balanced = extractFirstBalancedObject(cleaned);
+  if (!balanced) {
+    throw new Error("Model response did not include JSON.");
+  }
+
+  const direct = tryParseJson(balanced);
+  if (direct !== null) return direct;
+
+  const noComments = balanced
+    .replace(/^\s*\/\/.*$/gm, "")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  const commentParsed = tryParseJson(noComments);
+  if (commentParsed !== null) return commentParsed;
+
+  const commaFix = noComments
+    .replace(/,\s*([}\]])/g, "$1")
+    .replace(/"\s*\n\s*"/g, "\",\n\"");
+  const commaParsed = tryParseJson(commaFix);
+  if (commaParsed !== null) return commaParsed;
+
+  throw new Error("Model response did not include valid JSON.");
+}
+
+async function requestJsonFromProvider(
+  provider: AIProvider,
+  settings: AISettings,
+  prompt: string,
+  keyEntry: AIKeyEntry,
+  options?: { maxTokens?: number }
+) {
+  if (!(keyEntry.key || "").trim()) {
+    throw new Error("Missing API key.");
+  }
+  let currentResult = await requestProviderContent(provider, settings, keyEntry, {
+    prompt,
+    maxTokens: options?.maxTokens ?? 1800,
+    temperature: 0.1,
+    forceJson: true,
+  });
+
+  // Handle 429 Rate Limits with basic backoff
+  if (!currentResult.ok && currentResult.status === 429) {
+    await delay(1500); // 1.5s wait
+    currentResult = await requestProviderContent(provider, settings, keyEntry, {
+      prompt,
+      maxTokens: options?.maxTokens ?? 1800,
+      temperature: 0.1,
+      forceJson: true,
+    });
+    if (!currentResult.ok && currentResult.status === 429) {
+      await delay(3000); // 3s wait
+      currentResult = await requestProviderContent(provider, settings, keyEntry, {
+        prompt,
+        maxTokens: options?.maxTokens ?? 1800,
+        temperature: 0.1,
+        forceJson: true,
+      });
+    }
+  }
+
+  applyProviderResultStatus(keyEntry, currentResult);
+
+  if (!currentResult.ok) {
+    if (provider === "gemini" && currentResult.status === 404) {
+      throw new Error("Gemini model not available for this key/project. Try another provider or update model in Settings.");
+    }
+    const err = new Error(`Provider request failed (${currentResult.status || 0}).`) as Error & { status?: number };
+    err.status = currentResult.status || 0;
+    throw err;
+  }
+
+  if (!currentResult.content) {
+    throw new Error("Provider returned empty response.");
+  }
+  try {
+    return extractJsonObject(currentResult.content);
+  } catch {
+    updateKeyStatus(keyEntry.id, { lastError: "Non-JSON response" });
+    const retryPrompt = `${prompt}
+
+IMPORTANT:
+- Return ONLY one valid JSON object.
+- No markdown, no prose, no code fences.`;
+    const retry = await requestProviderContent(provider, settings, keyEntry, {
+      prompt: retryPrompt,
+      maxTokens: options?.maxTokens ?? 1800,
+      temperature: 0,
+      forceJson: true,
+    });
+    applyProviderResultStatus(keyEntry, retry);
+    if (!retry.ok || !retry.content) {
+      throw new Error(`Provider returned non-JSON output and retry failed (${retry.status || 0}).`);
+    }
+    try {
+      return extractJsonObject(retry.content);
+    } catch {
+      const repairPrompt = `Fix the following invalid JSON and return ONLY corrected JSON.
+
+INVALID JSON:
+${retry.content}`;
+      const repair = await requestProviderContent(provider, settings, keyEntry, {
+        prompt: repairPrompt,
+        maxTokens: options?.maxTokens ?? 1800,
+        temperature: 0,
+        forceJson: true,
+      });
+      applyProviderResultStatus(keyEntry, repair);
+      if (!repair.ok || !repair.content) {
+        throw new Error(`Provider JSON repair failed (${repair.status || 0}).`);
+      }
+      return extractJsonObject(repair.content);
+    }
+  }
+}
+
+function normalizeQuestionCandidates(json: any, input: AIChunkArtifactInput) {
+  const rows = Array.isArray(json?.questions) ? json.questions : [];
+  const targetType = input.questionType || "mcq";
+  const difficulty = input.difficulty || "medium";
+  const bloom = input.bloomLevel || "understand";
+
+  const mapped = rows
+    .filter((row: any) => row && typeof row === "object")
+    .map((row: any) => {
+      const options = Array.isArray(row.options) ? row.options.map((x: unknown) => String(x || "").trim()).filter(Boolean) : [];
+      return {
+        question_type: String(row.question_type || targetType || "mcq").toLowerCase(),
+        question_text: String(row.question_text || row.prompt || "").trim(),
+        options: options.length ? options : undefined,
+        correct_answer: String(row.correct_answer || row.answer_key || "").trim(),
+        explanation: String(row.explanation || "").trim(),
+        difficulty: String(row.difficulty || difficulty).toLowerCase(),
+        bloom_level: String(row.bloom_level || bloom).toLowerCase(),
+        marks: Number(row.marks) > 0 ? Number(row.marks) : undefined,
+      };
+    })
+    .filter((row: { question_text: string }) => row.question_text);
+
+  return mapped;
+}
+
+function normalizeWorksheetCandidate(json: any) {
+  const worksheet = json?.worksheet && typeof json.worksheet === "object" ? json.worksheet : json;
+  const items = Array.isArray(worksheet?.items) ? worksheet.items : [];
+  return {
+    title: String(worksheet?.title || "AI Worksheet").trim(),
+    items: items
+      .filter((row: any) => row && typeof row === "object")
+      .map((row: any, index: number) => ({
+        order_no: Number(row.order_no) > 0 ? Number(row.order_no) : index + 1,
+        item_type: String(row.item_type || row.type || "short").trim(),
+        prompt: String(row.prompt || row.question_text || "").trim(),
+        options: Array.isArray(row.options) ? row.options : null,
+        answer_key: String(row.answer_key || row.correct_answer || "").trim() || null,
+        marks: Number(row.marks) > 0 ? Number(row.marks) : null,
+        bloom_level: String(row.bloom_level || "").trim() || null,
+        difficulty: String(row.difficulty || "").trim() || null,
+      }))
+      .filter((row: any) => row.prompt),
+  };
+}
+
+function normalizeLessonPlanCandidate(json: any) {
+  const lesson = json?.lesson_plan && typeof json.lesson_plan === "object" ? json.lesson_plan : json;
+  const blocks = Array.isArray(lesson?.blocks) ? lesson.blocks : [];
+  return {
+    title: String(lesson?.title || "AI Lesson Plan").trim(),
+    duration_minutes: Number(lesson?.duration_minutes) > 0 ? Number(lesson.duration_minutes) : 40,
+    objectives: Array.isArray(lesson?.objectives) ? lesson.objectives : [],
+    blocks: blocks
+      .filter((row: any) => row && typeof row === "object")
+      .map((row: any, index: number) => ({
+        order_no: Number(row.order_no) > 0 ? Number(row.order_no) : index + 1,
+        block_type: String(row.block_type || row.type || "instruction").trim(),
+        duration_minutes: Number(row.duration_minutes) > 0 ? Number(row.duration_minutes) : null,
+        content: String(row.content || row.prompt || "").trim(),
+        resources: Array.isArray(row.resources) ? row.resources : [],
+      }))
+      .filter((row: any) => row.content),
+  };
+}
+
+function buildArtifactPrompt(input: AIChunkArtifactInput) {
+  const context = (input.contextText || "").trim().slice(0, 24000);
+  const contextLabel = input.contextLabel || "Selected chapter/topic";
+  const instructions = input.instructions?.trim() ? `Additional instructions: ${input.instructions}` : "Additional instructions: none";
+
+  if (input.artifact === "question") {
+    return `You are an exam content generator. Use ONLY the provided source text.
+Context: ${contextLabel}
+Question count: ${input.count || 10}
+Question type: ${input.questionType || "mcq"}
+Difficulty: ${input.difficulty || "medium"}
+Bloom level: ${input.bloomLevel || "understand"}
+${instructions}
+
+Return STRICT JSON only:
+{"questions":[{"question_type":"mcq","question_text":"...","options":["...","...","...","..."],"correct_answer":"A","explanation":"...","difficulty":"easy|medium|hard","bloom_level":"remember|understand|apply|analyze|evaluate","marks":1}]}
+
+Rules:
+- Use only facts from source text.
+- Do not invent chapter names or facts.
+- For non-mcq types, options may be omitted.
+- Keep language classroom-friendly.
+- Do NOT create questions from boilerplate/meta lines such as: "learning outcomes", "you will be able to", instructions, activities, or teacher notes.
+- Prefer core concept/content questions from across different parts of the source.
+
+Source text:
+"""${context}"""`;
+  }
+
+  if (input.artifact === "worksheet") {
+    return `You are a worksheet generator. Use ONLY the provided source text.
+Context: ${contextLabel}
+Item count target: ${input.count || 10}
+Difficulty: ${input.difficulty || "medium"}
+Bloom level: ${input.bloomLevel || "understand"}
+${instructions}
+
+Return STRICT JSON only:
+{"worksheet":{"title":"...","items":[{"order_no":1,"item_type":"short","prompt":"...","answer_key":"...","marks":2,"difficulty":"easy","bloom_level":"understand"}]}}
+
+Rules:
+- Use only source text facts.
+- Include varied item types where suitable.
+- Keep prompts age-appropriate.
+
+Source text:
+"""${context}"""`;
+  }
+
+  return `You are a lesson planner. Use ONLY the provided source text.
+Context: ${contextLabel}
+${instructions}
+
+Return STRICT JSON only:
+{"lesson_plan":{"title":"...","duration_minutes":40,"objectives":["..."],"blocks":[{"order_no":1,"block_type":"warmup","duration_minutes":5,"content":"...","resources":[]}]}}
+
+Rules:
+- Use only source text facts.
+- 3-5 lesson blocks.
+- Keep objectives measurable and specific.
+
+Source text:
+"""${context}"""`;
+}
+
+export async function generateArtifactCandidatesFromText(input: AIChunkArtifactInput): Promise<Record<string, unknown>[]> {
+  const settings = getAISettings();
+  const providerPriority: AIProvider[] = [
+    "groq",
+    "gemini",
+    "deepseek",
+    "qwen",
+    "siliconflow",
+    "openrouter",
+    "together",
+    "openai",
+    "anthropic",
+  ];
+
+  const keyChain = buildRuntimeKeyChain(settings, providerPriority);
+
+  if (!keyChain.length) {
+    throw new Error("No AI keys configured. Add a provider key in Settings.");
+  }
+
+  const normalizeQuestionKey = (row: Record<string, unknown>) =>
+    String(row.question_text || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  if (input.artifact === "question") {
+    const targetCount = Math.max(1, Math.min(Number(input.count || 10), 50));
+    const questionMap = new Map<string, Record<string, unknown>>();
+    const blockedKeyIds = new Set<string>();
+    let lastError = "All providers failed.";
+    const maxPasses = 6;
+
+    for (let pass = 0; pass < maxPasses && questionMap.size < targetCount; pass += 1) {
+      const runKeys = keyChain.filter((entry) => !blockedKeyIds.has(entry.id));
+      if (!runKeys.length) {
+        break;
+      }
+      const remaining = targetCount - questionMap.size;
+      const existing = Array.from(questionMap.values())
+        .slice(0, 12)
+        .map((row) => String(row.question_text || "").trim())
+        .filter(Boolean)
+        .join("\n- ");
+      const extraInstructions = [
+        input.instructions?.trim() || "",
+        `Return exactly ${remaining} unique questions in this pass.`,
+        existing ? `Avoid duplicates of these already accepted questions:\n- ${existing}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+      const passInput: AIChunkArtifactInput = {
+        ...input,
+        count: remaining,
+        instructions: extraInstructions,
+      };
+      const prompt = buildArtifactPrompt(passInput);
+      const passMaxTokens = Math.min(4096, 1000 + remaining * (passInput.questionType === "mcq" ? 240 : 180));
+
+      let addedThisPass = 0;
+      for (const keyEntry of runKeys) {
+        try {
+          const json = await requestJsonFromProvider(keyEntry.provider, settings, prompt, keyEntry, {
+            maxTokens: passMaxTokens,
+          });
+          const questions = normalizeQuestionCandidates(json, passInput);
+          if (!questions.length) throw new Error("No questions returned.");
+
+          const before = questionMap.size;
+          for (const row of questions) {
+            const key = normalizeQuestionKey(row);
+            if (!key || questionMap.has(key)) continue;
+            questionMap.set(key, row as Record<string, unknown>);
+          }
+          addedThisPass = questionMap.size - before;
+          if (questionMap.size >= targetCount) break;
+          if (addedThisPass > 0) break;
+        } catch (error) {
+          const errStatus =
+            typeof (error as { status?: unknown })?.status === "number"
+              ? Number((error as { status?: unknown }).status)
+              : 0;
+          if (errStatus === 429 || errStatus === 401 || errStatus === 403) {
+            blockedKeyIds.add(keyEntry.id);
+          }
+          lastError = error instanceof Error ? error.message : "Provider failed.";
+          console.warn(`[AI Artifact] Provider ${keyEntry.provider} (${keyEntry.id}) failed:`, error);
+        }
+      }
+
+      if (addedThisPass === 0) {
+        break;
+      }
+    }
+
+    const out = Array.from(questionMap.values()).slice(0, targetCount);
+    if (!out.length) {
+      throw new Error("No questions returned.");
+    }
+    if (out.length < targetCount) {
+      console.warn(`[AI Artifact] Requested ${targetCount} questions, generated ${out.length}.`);
+    }
+    return out;
+  }
+
+  const prompt = buildArtifactPrompt(input);
+  let lastError = "All providers failed.";
+  for (const keyEntry of keyChain) {
+    try {
+      const json = await requestJsonFromProvider(keyEntry.provider, settings, prompt, keyEntry);
+      if (input.artifact === "worksheet") {
+        const worksheet = normalizeWorksheetCandidate(json);
+        if (!worksheet.items.length) throw new Error("Worksheet has no items.");
+        return [worksheet];
+      }
+      const lessonPlan = normalizeLessonPlanCandidate(json);
+      if (!lessonPlan.blocks.length) throw new Error("Lesson plan has no blocks.");
+      return [lessonPlan];
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : "Provider failed.";
+      console.warn(`[AI Artifact] Provider ${keyEntry.provider} (${keyEntry.id}) failed:`, error);
+    }
+  }
+
+  throw new Error(lastError || "Failed to generate content from source text.");
+}
+
 export async function generateSyllabus(input: AISyllabusInput): Promise<string[]> {
   const settings = getAISettings();
   const prompt = `Generate a standard chapter-wise syllabus list for:
@@ -681,75 +1581,25 @@ Do not include chapter numbers in the titles.`;
     "groq", "gemini", "deepseek", "qwen", "siliconflow", "openrouter", "together", "openai", "anthropic"
   ];
 
-  const keyChain = [...settings.keyPool]
-    .filter(k => !k.isExhausted)
-    .sort((a, b) => {
-      if (settings.activeKeyId) {
-        if (a.id === settings.activeKeyId && b.id !== settings.activeKeyId) return -1;
-        if (a.id !== settings.activeKeyId && b.id === settings.activeKeyId) return 1;
-      }
-      if (a.provider === settings.provider && b.provider !== settings.provider) return -1;
-      if (a.provider !== settings.provider && b.provider === settings.provider) return 1;
-      const aIdx = providerPriority.indexOf(a.provider);
-      const bIdx = providerPriority.indexOf(b.provider);
-      return aIdx - bIdx;
-    });
+  const keyChain = buildRuntimeKeyChain(settings, providerPriority);
 
   for (const keyEntry of keyChain) {
-    const provider = keyEntry.provider;
-    const apiKey = keyEntry.key;
-    const keyId = keyEntry.id;
     try {
-      let content = "";
-      if (provider === "gemini") {
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${settings.model || "gemini-1.5-flash"}:generateContent?key=${apiKey}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }] }),
-        });
-        if (response.ok) {
-          const data = await response.json();
-          content = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-          updateKeyStatus(keyId, { usageCount: (keyEntry.usageCount || 0) + 1, lastUsed: new Date().toISOString() });
-        } else if (response.status === 429) {
-          updateKeyStatus(keyId, { isExhausted: true, quotaRemaining: "Quota Exceeded" });
+      const result = await requestProviderContent(keyEntry.provider, settings, keyEntry, {
+        prompt,
+        maxTokens: 1500,
+        temperature: 0.1,
+        forceJson: true,
+      });
+      applyProviderResultStatus(keyEntry, result);
+      if (result.ok && result.content) {
+        const parsed = extractJsonObject(result.content);
+        if (Array.isArray(parsed?.chapters)) {
+          return parsed.chapters.map((value: unknown) => String(value || "").trim()).filter(Boolean);
         }
-      } else {
-        const urlMap: Record<string, string> = {
-          groq: "https://api.groq.com/openai/v1/chat/completions",
-          openai: "https://api.openai.com/v1/chat/completions",
-          openrouter: "https://openrouter.ai/api/v1/chat/completions",
-          deepseek: "https://api.deepseek.com/v1/chat/completions",
-          qwen: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-          siliconflow: "https://api.siliconflow.cn/v1/chat/completions",
-          together: "https://api.together.xyz/v1/chat/completions",
-        };
-        const url = urlMap[provider];
-        const model = settings.model || (provider === "groq" ? "llama-3.3-70b-versatile" : provider === "openai" ? "gpt-4o-mini" : "");
-
-        if (url && apiKey) {
-          const resp = await fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-            body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], max_tokens: 1500 }),
-          });
-          if (resp.ok) {
-            const data = await resp.json();
-            content = data?.choices?.[0]?.message?.content || "";
-            updateKeyStatus(keyId, { usageCount: (keyEntry.usageCount || 0) + 1, lastUsed: new Date().toISOString() });
-          } else if (resp.status === 429) {
-            updateKeyStatus(keyId, { isExhausted: true, quotaRemaining: "Rate Limited" });
-          }
-        }
-      }
-
-      if (content) {
-        const cleaned = content.replace(/```json|```/g, "").trim();
-        const parsed = JSON.parse(cleaned);
-        if (Array.isArray(parsed.chapters)) return parsed.chapters;
       }
     } catch (err) {
-      console.warn(`[AI Syllabus] Provider ${provider} (Key ${keyId}) failed:`, err);
+      console.warn(`[AI Syllabus] Provider ${keyEntry.provider} (Key ${keyEntry.id}) failed:`, err);
     }
   }
 
@@ -877,19 +1727,7 @@ Subject Text (excerpt [0-${excerptLimit}]):
     "groq", "gemini", "deepseek", "qwen", "siliconflow", "openrouter", "together", "openai", "anthropic"
   ];
 
-  const keyChain = [...settings.keyPool]
-    .filter(k => !k.isExhausted)
-    .sort((a, b) => {
-      if (settings.activeKeyId) {
-        if (a.id === settings.activeKeyId && b.id !== settings.activeKeyId) return -1;
-        if (a.id !== settings.activeKeyId && b.id === settings.activeKeyId) return 1;
-      }
-      if (a.provider === settings.provider && b.provider !== settings.provider) return -1;
-      if (a.provider !== settings.provider && b.provider === settings.provider) return 1;
-      const aIdx = providerPriority.indexOf(a.provider);
-      const bIdx = providerPriority.indexOf(b.provider);
-      return aIdx - bIdx;
-    });
+  const keyChain = buildRuntimeKeyChain(settings, providerPriority);
 
   if (!keyChain.length) {
     throw new Error("No AI keys configured. Add an API key in Settings > AI Provider Infrastructure.");
@@ -897,115 +1735,23 @@ Subject Text (excerpt [0-${excerptLimit}]):
 
   async function requestOutline(requestPrompt: string) {
     for (const keyEntry of keyChain) {
-      const provider = keyEntry.provider;
-      const apiKey = (keyEntry.key || "").trim();
-      const keyId = keyEntry.id;
-      if (!apiKey) continue;
-
+      if (!(keyEntry.key || "").trim()) continue;
       try {
-        let content = "";
-        if (provider === "gemini") {
-          let modelId = (settings.model || "gemini-1.5-flash").trim();
-          if (!modelId.toLowerCase().includes("gemini")) {
-            modelId = "gemini-1.5-flash";
-          }
-          const modelCandidates = Array.from(
-            new Set([
-              modelId,
-              modelId.endsWith("-latest") ? modelId.replace(/-latest$/i, "") : `${modelId}-latest`,
-            ])
-          ).filter(Boolean);
-
-          const tryUrl = async (url: string) => {
-            console.log(`[AI Request] Gemini URL: ${url.replace(apiKey, "REDACTED")}`);
-            return fetch(url, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                contents: [{ role: "user", parts: [{ text: requestPrompt }] }],
-                generationConfig: { temperature: 0.0, maxOutputTokens: 1200 }
-              }),
-            });
-          };
-
-          let response: Response | null = null;
-          for (const candidate of modelCandidates) {
-            const v1betaUrl = `https://generativelanguage.googleapis.com/v1beta/models/${candidate}:generateContent?key=${apiKey}`;
-            response = await tryUrl(v1betaUrl);
-            if (response.ok) break;
-
-            if (response.status === 404) {
-              console.log("[AI Request] Gemini v1beta 404ed, trying v1...");
-              const v1Url = `https://generativelanguage.googleapis.com/v1/models/${candidate}:generateContent?key=${apiKey}`;
-              response = await tryUrl(v1Url);
-              if (response.ok) break;
-            }
-          }
-
-          if (response?.ok) {
-            const data = await response.json();
-            content = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-            updateKeyStatus(keyId, { usageCount: (keyEntry.usageCount || 0) + 1, lastUsed: new Date().toISOString(), lastError: undefined });
-          } else if (response?.status === 429) {
-            updateKeyStatus(keyEntry.id, { isExhausted: true, quotaRemaining: "Quota Exceeded", lastError: "Rate Limited" });
-          } else if (response?.status === 440 || response?.status === 401 || response?.status === 403) {
-            updateKeyStatus(keyEntry.id, { lastError: "Invalid Key (401/403)" });
-          } else if (response) {
-            updateKeyStatus(keyEntry.id, { lastError: `HTTP ${response.status}` });
-          }
-        } else {
-          const urlMap: Record<string, string> = {
-            groq: "https://api.groq.com/openai/v1/chat/completions",
-            openai: "https://api.openai.com/v1/chat/completions",
-            openrouter: "https://openrouter.ai/api/v1/chat/completions",
-            deepseek: "https://api.deepseek.com/v1/chat/completions",
-            qwen: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-            siliconflow: "https://api.siliconflow.cn/v1/chat/completions",
-            together: "https://api.together.xyz/v1/chat/completions",
-          };
-          const url = urlMap[provider];
-          
-          // Use provider-specific defaults if settings.model is mismatched
-          let model = (settings.model || "").trim();
-          if (provider === "groq" && (!model || model.includes("gemini") || model.includes("gpt"))) {
-            model = "llama-3.3-70b-versatile";
-          } else if (provider === "openai" && (!model || !model.startsWith("gpt"))) {
-            model = "gpt-4o-mini";
-          } else if (!model) {
-            model = provider === "groq" ? "llama-3.3-70b-versatile" : "gpt-4o-mini";
-          }
-          
-          console.log(`[AI Request] Provider: ${provider}, URL: ${url}, Model: ${model}`);
-
-          if (url) {
-            const resp = await fetch(url, {
-              method: "POST",
-              headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-              body: JSON.stringify({
-                model,
-                messages: [{ role: "user", content: requestPrompt }],
-                temperature: 0.0,
-                max_tokens: 1500,
-                response_format: provider === "openai" || provider === "openrouter" ? { type: "json_object" } : undefined,
-              }),
-            });
-            if (resp.ok) {
-              const data = await resp.json();
-              content = data?.choices?.[0]?.message?.content || "";
-              updateKeyStatus(keyId, { usageCount: (keyEntry.usageCount || 0) + 1, lastUsed: new Date().toISOString(), lastError: undefined });
-              } else {
-                updateKeyStatus(keyEntry.id, { lastError: resp.status === 413 ? "Request too large" : `HTTP ${resp.status}` });
-              }
-            }
-          }
-
-        if (content) {
-          console.log(`[AI Response] Provider: ${provider}, Content:`, content.slice(0, 500));
-          const outline = parseOutline(content);
+        const result = await requestProviderContent(keyEntry.provider, settings, keyEntry, {
+          prompt: requestPrompt,
+          maxTokens: 1500,
+          temperature: 0,
+          forceJson: true,
+          debug: true,
+        });
+        applyProviderResultStatus(keyEntry, result);
+        if (result.ok && result.content) {
+          console.log(`[AI Response] Provider: ${keyEntry.provider}, Content:`, result.content.slice(0, 500));
+          const outline = parseOutline(result.content);
           if (outline) return outline;
         }
       } catch (err) {
-        console.warn(`[AI Outline] Provider ${provider} (Key ${keyId}) failed:`, err);
+        console.warn(`[AI Outline] Provider ${keyEntry.provider} (Key ${keyEntry.id}) failed:`, err);
       }
     }
     return null;
@@ -1096,79 +1842,22 @@ Return JSON in this format:
     "groq", "gemini", "deepseek", "qwen", "siliconflow", "openrouter", "together", "openai", "anthropic"
   ];
 
-  const keyChain = [...settings.keyPool]
-    .filter(k => !k.isExhausted)
-    .sort((a, b) => {
-      if (settings.activeKeyId) {
-        if (a.id === settings.activeKeyId && b.id !== settings.activeKeyId) return -1;
-        if (a.id !== settings.activeKeyId && b.id === settings.activeKeyId) return 1;
-      }
-      if (a.provider === settings.provider && b.provider !== settings.provider) return -1;
-      if (a.provider !== settings.provider && b.provider === settings.provider) return 1;
-      const aIdx = providerPriority.indexOf(a.provider);
-      const bIdx = providerPriority.indexOf(b.provider);
-      return aIdx - bIdx;
-    });
+  const keyChain = buildRuntimeKeyChain(settings, providerPriority);
 
   for (const keyEntry of keyChain) {
-    const provider = keyEntry.provider;
-    const apiKey = keyEntry.key;
-    const keyId = keyEntry.id;
     try {
-      let content = "";
-      if (provider === "gemini") {
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${settings.model || "gemini-1.5-flash"}:generateContent?key=${apiKey}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ contents: messages.map(m => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })) }),
-        });
-        if (response.ok) {
-          const data = await response.json();
-          content = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-          updateKeyStatus(keyId, { usageCount: (keyEntry.usageCount || 0) + 1, lastUsed: new Date().toISOString() });
-        } else if (response.status === 429) {
-          updateKeyStatus(keyId, { isExhausted: true, quotaRemaining: "Quota Exceeded" });
-        }
-      } else {
-        const urlMap: Record<string, string> = {
-          groq: "https://api.groq.com/openai/v1/chat/completions",
-          openai: "https://api.openai.com/v1/chat/completions",
-          openrouter: "https://openrouter.ai/api/v1/chat/completions",
-          deepseek: "https://api.deepseek.com/v1/chat/completions",
-          qwen: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-          siliconflow: "https://api.siliconflow.cn/v1/chat/completions",
-          together: "https://api.together.xyz/v1/chat/completions",
-        };
-        const url = urlMap[provider];
-        const model = settings.model || (provider === "groq" ? "llama-3.3-70b-versatile" : provider === "openai" ? "gpt-4o-mini" : "");
-
-        if (url && apiKey) {
-          const resp = await fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-            body: JSON.stringify({
-              model,
-              messages,
-              temperature: 0.7,
-              response_format: { type: "json_object" }
-            }),
-          });
-          if (resp.ok) {
-            const data = await resp.json();
-            content = data?.choices?.[0]?.message?.content || "";
-            updateKeyStatus(keyId, { usageCount: (keyEntry.usageCount || 0) + 1, lastUsed: new Date().toISOString() });
-          } else if (resp.status === 429) {
-            updateKeyStatus(keyId, { isExhausted: true, quotaRemaining: "Rate Limited" });
-          }
-        }
-      }
-
-      if (content) {
-        const cleaned = content.replace(/```json|```/g, "").trim();
-        return JSON.parse(cleaned) as DiscussionResponse;
+      const result = await requestProviderContent(keyEntry.provider, settings, keyEntry, {
+        messages: messages as Array<{ role: "system" | "user" | "assistant"; content: string }>,
+        maxTokens: 1600,
+        temperature: 0.7,
+        forceJson: true,
+      });
+      applyProviderResultStatus(keyEntry, result);
+      if (result.ok && result.content) {
+        return extractJsonObject(result.content) as DiscussionResponse;
       }
     } catch (err) {
-      console.warn(`[AI Chat] Provider ${provider} (Key ${keyId}) failed:`, err);
+      console.warn(`[AI Chat] Provider ${keyEntry.provider} (Key ${keyEntry.id}) failed:`, err);
     }
   }
 
@@ -1203,6 +1892,35 @@ export async function refreshKeyStatus(keyEntry: AIKeyEntry) {
         updateKeyStatus(keyEntry.id, { lastError: `HTTP ${resp.status}` });
       }
     } catch (e) {
+      updateKeyStatus(keyEntry.id, { lastError: "Network Error" });
+    }
+    return;
+  }
+
+  if (provider === "anthropic") {
+    try {
+      const resp = await fetch("https://api.anthropic.com/v1/models", {
+        method: "GET",
+        headers: {
+          "x-api-key": keyEntry.key,
+          "anthropic-version": "2023-06-01",
+        },
+      });
+      if (resp.ok) {
+        updateKeyStatus(keyEntry.id, {
+          quotaRemaining: "Online (usage not exposed)",
+          lastUsed: new Date().toISOString(),
+          isExhausted: false,
+          lastError: undefined,
+        });
+      } else if (resp.status === 401 || resp.status === 403) {
+        updateKeyStatus(keyEntry.id, { lastError: "Invalid API Key", quotaRemaining: "Unauthorized" });
+      } else if (resp.status === 429) {
+        updateKeyStatus(keyEntry.id, { isExhausted: true, quotaRemaining: "Rate Limited", lastError: "Rate Limited" });
+      } else {
+        updateKeyStatus(keyEntry.id, { lastError: `HTTP ${resp.status}` });
+      }
+    } catch {
       updateKeyStatus(keyEntry.id, { lastError: "Network Error" });
     }
     return;
@@ -1281,6 +1999,19 @@ export async function testKeyConnection(keyEntry: AIKeyEntry): Promise<{ ok: boo
       const data = await resp.json().catch(() => ({}));
       return { ok: false, error: data?.error?.message || `HTTP ${resp.status}` };
     }
+
+    if (provider === "anthropic") {
+      const resp = await fetch("https://api.anthropic.com/v1/models", {
+        method: "GET",
+        headers: {
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+      });
+      if (resp.ok) return { ok: true };
+      const data = await resp.json().catch(() => ({}));
+      return { ok: false, error: data?.error?.message || `HTTP ${resp.status}` };
+    }
     
     const urlMap: Record<string, string> = {
       groq: "https://api.groq.com/openai/v1/models",
@@ -1305,6 +2036,82 @@ export async function testKeyConnection(keyEntry: AIKeyEntry): Promise<{ ok: boo
     return { ok: false, error: data?.error?.message || `HTTP ${resp.status}` };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : "Network error" };
+  }
+}
+
+export async function fetchProviderModels(provider: AIProvider, apiKey: string): Promise<{ models: string[]; error?: string }> {
+  const key = (apiKey || "").trim();
+  if (!key) {
+    return { models: [], error: "Missing API key" };
+  }
+
+  try {
+    if (provider === "gemini") {
+      const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${key}`);
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        return { models: [], error: data?.error?.message || `HTTP ${resp.status}` };
+      }
+      const data = await resp.json();
+      const models = Array.isArray(data?.models) ? data.models : [];
+      const ids = models
+        .filter((row: any) => {
+          const methods = Array.isArray(row?.supportedGenerationMethods) ? row.supportedGenerationMethods : [];
+          return methods.includes("generateContent");
+        })
+        .map((row: any) => normalizeGeminiModelName(String(row?.name || "")))
+        .filter(Boolean);
+      return { models: uniqStrings(ids) };
+    }
+
+    if (provider === "anthropic") {
+      const resp = await fetch("https://api.anthropic.com/v1/models", {
+        method: "GET",
+        headers: {
+          "x-api-key": key,
+          "anthropic-version": "2023-06-01",
+        },
+      });
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        return { models: [], error: data?.error?.message || `HTTP ${resp.status}` };
+      }
+      const data = await resp.json();
+      const rows = Array.isArray(data?.data) ? data.data : [];
+      const ids = rows.map((row: any) => String(row?.id || "").trim()).filter(Boolean);
+      return { models: uniqStrings(ids) };
+    }
+
+    const urlMap: Partial<Record<AIProvider, string>> = {
+      groq: "https://api.groq.com/openai/v1/models",
+      openrouter: "https://openrouter.ai/api/v1/models",
+      together: "https://api.together.xyz/v1/models",
+      openai: "https://api.openai.com/v1/models",
+      deepseek: "https://api.deepseek.com/models",
+      qwen: "https://dashscope.aliyuncs.com/compatible-mode/v1/models",
+      siliconflow: "https://api.siliconflow.cn/v1/models",
+    };
+    const url = urlMap[provider];
+    if (!url) {
+      return { models: [], error: "Model discovery not supported for this provider" };
+    }
+
+    const resp = await fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    });
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      return { models: [], error: data?.error?.message || `HTTP ${resp.status}` };
+    }
+    const data = await resp.json();
+    const rows = Array.isArray(data?.data) ? data.data : [];
+    const ids = rows
+      .map((row: any) => String(row?.id || row?.name || "").trim())
+      .filter(Boolean);
+    return { models: uniqStrings(ids) };
+  } catch (error) {
+    return { models: [], error: error instanceof Error ? error.message : "Failed to fetch models" };
   }
 }
 

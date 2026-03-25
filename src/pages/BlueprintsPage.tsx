@@ -212,29 +212,31 @@ export function BlueprintsPage() {
           </label>
           <label className="text-xs font-semibold text-slate-600">Class
             <select
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
+              className={`mt-1 w-full rounded-lg border px-3 py-2 ${!examBodyId ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400" : "border-slate-300"}`}
               value={classId}
               onChange={(e) => {
                 const nextClass = e.target.value;
                 setClassId(nextClass);
                 mergeScope({ examBodyId: examBodyId || undefined, classId: nextClass || undefined, subjectId: undefined, chapterId: undefined });
               }}
+              disabled={!examBodyId}
             >
-              <option value="">All Classes</option>
+              <option value="">{examBodyId ? "All Classes" : "Select Exam Body First"}</option>
               {classes.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
           </label>
           <label className="text-xs font-semibold text-slate-600">Subject
             <select
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
+              className={`mt-1 w-full rounded-lg border px-3 py-2 ${!classId ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400" : "border-slate-300"}`}
               value={subjectId}
               onChange={(e) => {
                 const nextSubject = e.target.value;
                 setSubjectId(nextSubject);
                 mergeScope({ examBodyId: examBodyId || undefined, classId: classId || undefined, subjectId: nextSubject || undefined, chapterId: undefined });
               }}
+              disabled={!classId}
             >
-              <option value="">All Subjects</option>
+              <option value="">{classId ? "All Subjects" : "Select Class First"}</option>
               {subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
           </label>
@@ -282,7 +284,7 @@ export function BlueprintsPage() {
         </div>
         <div className="flex gap-2">
           <button type="button" className="rounded-lg bg-slate-100 px-3 py-2 text-xs font-semibold" onClick={() => setSections((prev) => [...prev, { type: "mcq", count: 1, marks: 1 }])}>+ Add Section</button>
-          <button className="rounded-lg bg-brand px-4 py-2 text-sm font-bold text-white shadow-lg shadow-brand/20">Save Blueprint</button>
+          <button disabled={!classId || !subjectId} className="rounded-lg bg-brand px-4 py-2 text-sm font-bold text-white shadow-lg shadow-brand/20 disabled:cursor-not-allowed disabled:opacity-60">Save Blueprint</button>
         </div>
       </form>
 

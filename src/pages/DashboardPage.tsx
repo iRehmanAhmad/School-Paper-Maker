@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Bar, Doughnut, Line } from "react-chartjs-2";
 import { ArcElement, CategoryScale, Chart as ChartJS, Filler, Legend, LinearScale, BarElement, Tooltip, LineElement, PointElement } from "chart.js";
 import { ArrowDownRight, ArrowUpRight, BookCheck, BookOpen, FileText, FolderPlus, Layers3, Sparkles, WandSparkles } from "lucide-react";
-import { getChapters, getClasses, getPapersByTeacher, getQuestions, getStats, getSubjects } from "@/services/repositories";
+import { getChapters, getClasses, getPapersBySchool, getPapersByTeacher, getQuestions, getStats, getSubjects } from "@/services/repositories";
 import { useAppStore } from "@/store/useAppStore";
 import { LoadingDashboard } from "@/components/LoadingState";
 import type { ChapterEntity, ClassEntity, Paper, Question, SubjectEntity } from "@/types/domain";
@@ -55,10 +55,11 @@ export function DashboardPage() {
 
       setLoading(true);
       try {
-        const [s, qs, teacherPapers, schoolClasses] = await Promise.all([
-          getStats(profile.school_id, profile.id),
+        const paperScopePromise = profile.role === "admin" ? getPapersBySchool(profile.school_id) : getPapersByTeacher(profile.id);
+        const [s, qs, scopedPapers, schoolClasses] = await Promise.all([
+          getStats(profile.school_id, profile.role === "admin" ? undefined : profile.id),
           getQuestions(profile.school_id),
-          getPapersByTeacher(profile.id),
+          paperScopePromise,
           getClasses(profile.school_id),
         ]);
 
@@ -69,7 +70,7 @@ export function DashboardPage() {
 
         setStats(s);
         setQuestions(qs);
-        setPapers(teacherPapers);
+        setPapers(scopedPapers);
         setClasses(schoolClasses);
         setSubjects(schoolSubjects);
         setChapters(schoolChapters);

@@ -1,6 +1,23 @@
 import { canUseSupabase, supabase } from "@/services/supabase";
-import type { Question, PaperQuestion, QuestionUsage } from "@/types/domain";
+import type { BloomLevel, Difficulty, Question, QuestionType, PaperQuestion, QuestionUsage } from "@/types/domain";
 import { DB, ensureSeed, readLocal, writeLocal } from "./baseService";
+
+export type GetQuestionsPageInput = {
+    schoolId: string;
+    chapterIds?: string[];
+    topicId?: string;
+    search?: string;
+    difficulty?: Difficulty | "all";
+    questionType?: QuestionType | "all";
+    bloomLevel?: BloomLevel | "all";
+    page?: number;
+    pageSize?: number;
+};
+
+export type GetQuestionsPageResult = {
+    rows: Question[];
+    total: number;
+};
 
 export async function getQuestions(schoolId: string, chapterIds?: string[]) {
     ensureSeed();
@@ -17,6 +34,79 @@ export async function getQuestions(schoolId: string, chapterIds?: string[]) {
     }
     const pool = readLocal<Question>(DB.questions).filter((q) => q.school_id === schoolId);
     return chapterIds?.length ? pool.filter((q) => chapterIds.includes(q.chapter_id)) : pool;
+}
+
+export async function getQuestionsPage(input: GetQuestionsPageInput): Promise<GetQuestionsPageResult> {
+    ensureSeed();
+    const page = Math.max(1, Math.floor(input.page || 1));
+    const pageSize = Math.max(1, Math.floor(input.pageSize || 25));
+    const search = (input.search || "").trim();
+
+    if (canUseSupabase()) {
+        let query = supabase!
+            .from("questions")
+            .select("*", { count: "exact" })
+            .eq("school_id", input.schoolId)
+            .order("created_at", { ascending: false });
+
+        if (input.chapterIds?.length) {
+            query = query.in("chapter_id", input.chapterIds);
+        }
+        if (input.topicId) {
+            query = query.eq("topic_id", input.topicId);
+        }
+        if (input.difficulty && input.difficulty !== "all") {
+            query = query.eq("difficulty", input.difficulty);
+        }
+        if (input.questionType && input.questionType !== "all") {
+            query = query.eq("question_type", input.questionType);
+        }
+        if (input.bloomLevel && input.bloomLevel !== "all") {
+            query = query.eq("bloom_level", input.bloomLevel);
+        }
+        if (search) {
+            query = query.ilike("question_text", `%${search}%`);
+        }
+
+        const from = (page - 1) * pageSize;
+        const to = from + pageSize - 1;
+        const { data, error, count } = await query.range(from, to);
+        if (error) {
+            throw error;
+        }
+        return {
+            rows: (data ?? []) as Question[],
+            total: Number(count || 0),
+        };
+    }
+
+    let filtered = readLocal<Question>(DB.questions).filter((q) => q.school_id === input.schoolId);
+    if (input.chapterIds?.length) {
+        const chapterSet = new Set(input.chapterIds);
+        filtered = filtered.filter((q) => chapterSet.has(q.chapter_id));
+    }
+    if (input.topicId) {
+        filtered = filtered.filter((q) => (q.topic_id || "") === input.topicId);
+    }
+    if (input.difficulty && input.difficulty !== "all") {
+        filtered = filtered.filter((q) => q.difficulty === input.difficulty);
+    }
+    if (input.questionType && input.questionType !== "all") {
+        filtered = filtered.filter((q) => q.question_type === input.questionType);
+    }
+    if (input.bloomLevel && input.bloomLevel !== "all") {
+        filtered = filtered.filter((q) => (q.bloom_level || "") === input.bloomLevel);
+    }
+    if (search) {
+        const needle = search.toLowerCase();
+        filtered = filtered.filter((q) => (q.question_text || "").toLowerCase().includes(needle));
+    }
+
+    filtered = filtered.sort((a, b) => b.created_at.localeCompare(a.created_at));
+    const total = filtered.length;
+    const from = (page - 1) * pageSize;
+    const rows = filtered.slice(from, from + pageSize);
+    return { rows, total };
 }
 
 export async function addQuestions(rows: Omit<Question, "id" | "created_at">[]) {

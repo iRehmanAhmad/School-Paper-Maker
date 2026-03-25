@@ -3,7 +3,7 @@ import { Bar, Doughnut, Line } from "react-chartjs-2";
 import { ArcElement, BarElement, CategoryScale, Chart as ChartJS, Filler, Legend, LinearScale, LineElement, PointElement, Tooltip } from "chart.js";
 import jsPDF from "jspdf";
 import * as XLSX from "xlsx";
-import { getChapters, getClasses, getPapersByTeacher, getQuestions, getSubjects } from "@/services/repositories";
+import { getChapters, getClasses, getPapersBySchool, getPapersByTeacher, getQuestions, getSubjects } from "@/services/repositories";
 import { useAppStore } from "@/store/useAppStore";
 import type { ChapterEntity, Paper, Question, QuestionType, SubjectEntity } from "@/types/domain";
 
@@ -70,17 +70,18 @@ export function AnalyticsPage() {
 
       try {
         const classes = await getClasses(profile.school_id);
-        const [allSubjects, allQuestions, teacherPapers] = await Promise.all([
+        const paperScopePromise = profile.role === "admin" ? getPapersBySchool(profile.school_id) : getPapersByTeacher(profile.id);
+        const [allSubjects, allQuestions, scopedPapers] = await Promise.all([
           getSubjects(classes.map((item) => item.id)),
           getQuestions(profile.school_id),
-          getPapersByTeacher(profile.id),
+          paperScopePromise,
         ]);
         const allChapters = await getChapters(allSubjects.map((item) => item.id));
 
         setSubjects(allSubjects);
         setChapters(allChapters);
         setQuestions(allQuestions);
-        setPapers(teacherPapers);
+        setPapers(scopedPapers);
       } catch (error) {
         toast("error", "Failed to load analytics data");
       }

@@ -639,29 +639,31 @@ export function ChaptersPage() {
         </label>
         <label className="text-xs font-semibold text-slate-600">Class
           <select
-            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
+            className={`mt-1 w-full rounded-lg border px-3 py-2 ${!examBodyId ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400" : "border-slate-300"}`}
             value={classId}
             onChange={(e) => {
               const nextClass = e.target.value;
               setClassId(nextClass);
               mergeScope({ examBodyId: examBodyId || undefined, classId: nextClass || undefined, subjectId: undefined, chapterId: undefined });
             }}
+            disabled={!examBodyId}
           >
-            <option value="">All Classes</option>
+            <option value="">{examBodyId ? "All Classes" : "Select Exam Body First"}</option>
             {classes.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
         </label>
         <label className="text-xs font-semibold text-slate-600">Subject
           <select
-            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
+            className={`mt-1 w-full rounded-lg border px-3 py-2 ${!classId ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400" : "border-slate-300"}`}
             value={subjectId}
             onChange={(e) => {
               const nextSubject = e.target.value;
               setSubjectId(nextSubject);
               mergeScope({ examBodyId: examBodyId || undefined, classId: classId || undefined, subjectId: nextSubject || undefined, chapterId: undefined });
             }}
+            disabled={!classId}
           >
-            <option value="">All Subjects</option>
+            <option value="">{classId ? "All Subjects" : "Select Class First"}</option>
             {subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
         </label>
@@ -689,10 +691,11 @@ export function ChaptersPage() {
         <label className="text-xs font-semibold text-slate-600">Number
           <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" type="number" value={number} onChange={(e) => setNumber(Number(e.target.value))} />
         </label>
-        <button className="h-10 self-end rounded-lg bg-brand px-4 py-2 text-white">Add</button>
+        <button disabled={!subjectId} className="h-10 self-end rounded-lg bg-brand px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-60">Add</button>
         <button
           type="button"
           onClick={handleAiSuggest}
+          disabled={!subjectId}
           className="flex h-10 items-center justify-center gap-2 self-end rounded-lg border-2 border-brand/20 bg-brand/5 px-4 py-2 text-xs font-bold text-brand transition-all hover:bg-brand/10"
         >
           <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
@@ -797,21 +800,6 @@ export function ChaptersPage() {
                           </td>
                           <td className="px-4 py-3 text-right">
                             <div className="flex justify-end gap-2">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  mergeScope({
-                                    examBodyId: examBodyId || undefined,
-                                    classId: classId || undefined,
-                                    subjectId: subjectId || undefined,
-                                    chapterId: row.id,
-                                  });
-                                  toast("success", "Context set to this chapter");
-                                }}
-                                className="rounded bg-indigo-50 px-2 py-1 text-[10px] font-bold uppercase tracking-tight text-indigo-700 hover:bg-indigo-100"
-                              >
-                                Use Context
-                              </button>
                               <button
                                 type="button"
                                 onClick={() => {

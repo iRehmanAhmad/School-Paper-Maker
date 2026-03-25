@@ -203,7 +203,15 @@ export async function getSchoolAISettings(schoolId: string | null | undefined) {
     if (!data) {
       return getAISettings();
     }
-    const merged = { ...getAISettings(), ...fromRow(data as Partial<SchoolAISettingsRow>) };
+    const local = getAISettings();
+    const cloud = fromRow(data as Partial<SchoolAISettingsRow>);
+    const merged = {
+      ...local,
+      ...cloud,
+      // Keep local vault entries/active key; cloud table currently stores provider keys + model only.
+      keyPool: local.keyPool || [],
+      activeKeyId: local.activeKeyId || "",
+    };
     saveAISettings(merged);
     return merged;
   } catch {

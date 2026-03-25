@@ -34,6 +34,7 @@ type ChunkSearchParams = {
   subject_id?: string;
   chapter_id?: string;
   topic_id?: string;
+  source_id?: string;
   query?: string;
   limit?: number;
 };
@@ -271,6 +272,7 @@ export async function searchContentChunks(params: ChunkSearchParams) {
     if (params.subject_id) query = query.eq("subject_id", params.subject_id);
     if (params.chapter_id) query = query.eq("chapter_id", params.chapter_id);
     if (params.topic_id) query = query.eq("topic_id", params.topic_id);
+    if (params.source_id) query = query.eq("source_id", params.source_id);
     if (queryText) query = query.ilike("content", `%${queryText}%`);
     const { data, error } = await query;
     if (error) throw error;
@@ -283,6 +285,7 @@ export async function searchContentChunks(params: ChunkSearchParams) {
   if (params.subject_id) rows = rows.filter((row) => row.subject_id === params.subject_id);
   if (params.chapter_id) rows = rows.filter((row) => row.chapter_id === params.chapter_id);
   if (params.topic_id) rows = rows.filter((row) => (row.topic_id || "") === params.topic_id);
+  if (params.source_id) rows = rows.filter((row) => row.source_id === params.source_id);
   if (queryText) rows = rows.filter((row) => row.content.toLowerCase().includes(queryText));
   return rows.sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, limit);
 }

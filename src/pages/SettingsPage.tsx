@@ -1,7 +1,7 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { getAISettings, getSchoolAISettings, saveSchoolAISettings, saveAISettings } from "@/services/aiSettings";
 import { type AIProvider, type AISettings } from "@/types/ai";
-import { refreshKeyStatus } from "@/services/ai";
+import { fetchProviderModels, refreshKeyStatus } from "@/services/ai";
 import { getAppSettings, saveAppSettings } from "@/services/appSettings";
 import { changeMyPassword } from "@/services/repositories";
 import { hasSupabase } from "@/services/supabase";
@@ -26,6 +26,10 @@ export function SettingsPage() {
   const [providerKeyDraft, setProviderKeyDraft] = useState(currentProviderKey);
   const [savingAI, setSavingAI] = useState(false);
   const [testingKeyId, setTestingKeyId] = useState<string | null>(null);
+  const [loadingDraftModels, setLoadingDraftModels] = useState(false);
+  const [draftModelOptionsAll, setDraftModelOptionsAll] = useState<string[]>([]);
+  const [lastFetchedDraftSignature, setLastFetchedDraftSignature] = useState("");
+  const [showAllDraftModels, setShowAllDraftModels] = useState(false);
 
   // Multi-key pool state
   const [newKeyProvider, setNewKeyProvider] = useState<AIProvider>("groq");
@@ -166,7 +170,7 @@ export function SettingsPage() {
 
   const modelPresets: Record<AIProvider, string> = {
     groq: "llama-3.3-70b-versatile",
-    gemini: "gemini-1.5-flash",
+    gemini: "gemini-2.0-flash",
     openrouter: "meta-llama/llama-3.3-70b-instruct:free",
     together: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
     deepseek: "deepseek-chat",
@@ -176,6 +180,68 @@ export function SettingsPage() {
     siliconflow: "deepseek-ai/DeepSeek-V3",
     supabase: "ai-generate-questions"
   };
+
+  const preferredModelHints: Record<AIProvider, string[]> = {
+    gemini: ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"],
+    groq: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen"],
+    openrouter: [":free", "llama", "qwen", "gemma"],
+    together: ["llama", "qwen", "mistral"],
+    openai: ["gpt-4.1-mini", "gpt-4o-mini", "gpt-4o"],
+    deepseek: ["deepseek-chat", "deepseek-reasoner"],
+    qwen: ["qwen-plus", "qwen-turbo"],
+    siliconflow: ["deepseek", "qwen"],
+    anthropic: ["claude-3-5-sonnet", "claude-3-5-haiku", "claude-3.7-sonnet"],
+    supabase: ["ai-generate-questions"],
+  };
+
+  const modelNoiseTokens = [
+    "embedding",
+    "embed-",
+    "rerank",
+    "moderation",
+    "whisper",
+    "tts",
+    "speech",
+    "transcribe",
+    "transcription",
+    "asr",
+    "dall-e",
+    "imagen",
+    "veo",
+  ];
+
+  const rankAndFilterModels = (provider: AIProvider, models: string[]) => {
+    const all = Array.from(new Set(models.map((m) => String(m || "").trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+    const recommendedRaw = all.filter((modelId) => {
+      const id = modelId.toLowerCase();
+      return !modelNoiseTokens.some((token) => id.includes(token));
+    });
+    const hints = preferredModelHints[provider] || [];
+    const scored = recommendedRaw
+      .map((modelId) => {
+        const id = modelId.toLowerCase();
+        let score = 0;
+        hints.forEach((hint, index) => {
+          if (id.includes(hint.toLowerCase())) score += 100 - index * 12;
+        });
+        if (id.includes(":free") || id.includes("free")) score += 15;
+        if (id.includes("mini") || id.includes("flash")) score += 5;
+        if (id.includes("preview") || id.includes("experimental")) score -= 20;
+        return { modelId, score };
+      })
+      .sort((a, b) => (b.score - a.score) || a.modelId.localeCompare(b.modelId))
+      .map((row) => row.modelId);
+
+    const recommended = scored.length ? scored : all;
+    return { all, recommended };
+  };
+
+  const rankedDraftModels = useMemo(
+    () => rankAndFilterModels(ai.provider, draftModelOptionsAll),
+    [ai.provider, draftModelOptionsAll]
+  );
+  const visibleDraftModels = showAllDraftModels ? rankedDraftModels.all : rankedDraftModels.recommended;
+
   const getKeyModel = (keyEntry: AISettings["keyPool"][number]) => {
     return keyEntry.model || (keyEntry.provider === ai.provider ? ai.model : modelPresets[keyEntry.provider]);
   };
@@ -206,12 +272,64 @@ export function SettingsPage() {
 
   const applyPreset = (prov: AIProvider) => {
     saveAISettings({ ...ai, provider: prov, model: modelPresets[prov] });
+    setDraftModelOptionsAll([]);
+    setLastFetchedDraftSignature("");
+    setShowAllDraftModels(false);
   };
 
-  const addKeyToPool = () => {
+  const applyDiscoveredModels = (provider: AIProvider, models: string[], keyId?: string) => {
+    if (!models.length) return;
+    const ranked = rankAndFilterModels(provider, models);
+    const recommended = ranked.recommended;
+    const selected = recommended.includes(ai.model) ? ai.model : (recommended[0] || ranked.all[0] || ai.model);
+    const next: AISettings = {
+      ...ai,
+      provider,
+      model: selected,
+      keyPool: keyId
+        ? ai.keyPool.map((k) => (k.id === keyId ? { ...k, model: selected } : k))
+        : ai.keyPool,
+    };
+    saveAISettings(next);
+    if (keyId) {
+      void saveAIOnly(next);
+    }
+  };
+
+  const fetchAndApplyModelsForDraft = async (force = false) => {
+    const key = providerKeyDraft.trim();
+    if (!key) return;
+    const signature = `${ai.provider}:${key}`;
+    if (!force && signature === lastFetchedDraftSignature) return;
+    setLoadingDraftModels(true);
+    try {
+      const result = await fetchProviderModels(ai.provider, key);
+      if (result.models.length) {
+        setDraftModelOptionsAll(result.models);
+        setLastFetchedDraftSignature(signature);
+        applyDiscoveredModels(ai.provider, result.models);
+      } else {
+        setDraftModelOptionsAll([]);
+        if (result.error) {
+          toast("error", `Model fetch failed: ${result.error}`);
+        } else {
+          toast("error", "No models were returned for this key.");
+        }
+      }
+    } finally {
+      setLoadingDraftModels(false);
+    }
+  };
+
+  const addKeyToPool = async () => {
     if (!newKeyValue) {
       toast("error", "Please enter an API key");
       return;
+    }
+    let detectedModel = modelPresets[newKeyProvider];
+    const discovered = await fetchProviderModels(newKeyProvider, newKeyValue.trim());
+    if (discovered.models.length) {
+      detectedModel = discovered.models[0];
     }
     const providerCount = (ai.keyPool || []).filter(k => k.provider === newKeyProvider).length;
     const stamp = new Date().toLocaleDateString() + " " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -222,10 +340,12 @@ export function SettingsPage() {
       label: newKeyLabel || `${newKeyProvider} Key #${providerCount + 1} • ${stamp}`,
       usageCount: 0,
       isExhausted: false,
-      model: modelPresets[newKeyProvider],
+      model: detectedModel,
     };
     const next = {
       ...ai,
+      provider: newKeyProvider,
+      model: detectedModel,
       keyPool: [...(ai.keyPool || []), newEntry],
       // Also update the primary key field for the provider if it's the first one
       [`${newKeyProvider}ApiKey`]: (ai[`${newKeyProvider}ApiKey` as keyof typeof ai] as string) || newKeyValue,
@@ -235,7 +355,12 @@ export function SettingsPage() {
     void saveAIOnly(next);
     setNewKeyValue("");
     setNewKeyLabel("");
-    toast("success", `Added ${newKeyProvider} key to vault`);
+    if (discovered.models.length) {
+      const ranked = rankAndFilterModels(newKeyProvider, discovered.models);
+      toast("success", `Added ${newKeyProvider} key. Showing ${ranked.recommended.length} recommended of ${ranked.all.length} model(s).`);
+    } else {
+      toast("success", `Added ${newKeyProvider} key to vault`);
+    }
   };
 
   const handleTestConnection = async (keyEntry: AIKeyEntry | { provider: AIProvider, key: string }) => {
@@ -245,6 +370,16 @@ export function SettingsPage() {
       const res = await testKeyConnection(id === "draft" ? { id: "draft", usageCount: 0, ...keyEntry } as AIKeyEntry : keyEntry as AIKeyEntry);
       if (res.ok) {
         toast("success", `${keyEntry.provider.toUpperCase()} connection successful! API key is valid.`);
+        const discovered = await fetchProviderModels(keyEntry.provider, keyEntry.key);
+        if (discovered.models.length) {
+          const ranked = rankAndFilterModels(keyEntry.provider, discovered.models);
+          if (id === "draft") {
+            setDraftModelOptionsAll(discovered.models);
+            setLastFetchedDraftSignature(`${keyEntry.provider}:${keyEntry.key.trim()}`);
+          }
+          applyDiscoveredModels(keyEntry.provider, discovered.models, id === "draft" ? undefined : id);
+          toast("success", `Loaded ${ranked.recommended.length} recommended of ${ranked.all.length} model(s) from ${keyEntry.provider.toUpperCase()}.`);
+        }
       } else {
         toast("error", `${keyEntry.provider.toUpperCase()} test failed: ${res.error}`);
       }
@@ -256,18 +391,25 @@ export function SettingsPage() {
     }
   };
 
-  const saveProviderKey = () => {
+  const saveProviderKey = async () => {
     const trimmed = providerKeyDraft.trim();
     if (!trimmed) {
       toast("error", "Please enter an API key");
       return;
+    }
+    let detectedModel = ai.model || modelPresets[ai.provider];
+    const discovered = await fetchProviderModels(ai.provider, trimmed);
+    if (discovered.models.length) {
+      detectedModel = discovered.models.includes(detectedModel) ? detectedModel : discovered.models[0];
+      setDraftModelOptionsAll(discovered.models);
+      setLastFetchedDraftSignature(`${ai.provider}:${trimmed}`);
     }
     const keyField = `${ai.provider}ApiKey` as keyof AISettings;
     const existing = (ai.keyPool || []).find((k) => k.provider === ai.provider && k.key === trimmed);
     const keyPool = existing
       ? (ai.keyPool || []).map((k) =>
         k.id === existing.id
-          ? { ...k, isExhausted: false, quotaRemaining: undefined }
+          ? { ...k, isExhausted: false, quotaRemaining: undefined, model: detectedModel }
           : k
       )
       : [
@@ -279,18 +421,24 @@ export function SettingsPage() {
           label: "Primary Key",
           usageCount: 0,
           isExhausted: false,
-          model: ai.model || modelPresets[ai.provider],
+          model: detectedModel,
         },
       ];
     const next = {
       ...ai,
+      model: detectedModel,
       [keyField]: trimmed,
       keyPool,
       activeKeyId: existing ? existing.id : keyPool[keyPool.length - 1]?.id,
     } as AISettings;
     saveAISettings(next);
     void saveAIOnly(next);
-    toast("success", "API key saved");
+    if (discovered.models.length) {
+      const ranked = rankAndFilterModels(ai.provider, discovered.models);
+      toast("success", `API key saved. Showing ${ranked.recommended.length} recommended of ${ranked.all.length} model(s).`);
+    } else {
+      toast("success", "API key saved");
+    }
   };
 
   const removeKeyFromPool = (id: string) => {
@@ -513,6 +661,9 @@ export function SettingsPage() {
             AI Provider Infrastructure
           </h3>
           <p className="mt-2 text-sm text-slate-500">Configure your favorite AI brain. Free-tier friendly options like <strong>Groq</strong> and <strong>Gemini</strong> are highly recommended.</p>
+          <p className="mt-1 text-xs text-slate-500">
+            Model fallback is enabled for all providers: <strong>Key Model</strong> -&gt; <strong>Active Model ID</strong> -&gt; <strong>Provider Defaults</strong>.
+          </p>
         </div>
 
         <div className="p-6">
@@ -544,13 +695,45 @@ export function SettingsPage() {
                 AI Model ID
                 <div className="relative">
                 <input
+                  list="provider-model-options"
                   className="mt-1.5 w-full rounded-xl border border-slate-300 dark:border-slate-700 px-4 py-2.5 focus:border-brand outline-none bg-bg dark:bg-slate-900/50 text-ink"
                   value={ai.model}
                   onChange={(e) => saveAISettings({ ...ai, model: e.target.value })}
                   onBlur={() => saveAISettings({ ...ai, model: ai.model })}
                   placeholder="e.g. llama-3.3-70b-versatile"
                 />
+                  <datalist id="provider-model-options">
+                    {visibleDraftModels.map((modelId) => (
+                      <option key={modelId} value={modelId} />
+                    ))}
+                  </datalist>
                   <button onClick={() => applyPreset(ai.provider)} className="absolute right-2 top-[50%] -translate-y-[15%] p-1.5 text-brand text-[10px] font-bold uppercase tracking-tight">Auto-Fill</button>
+                </div>
+                <div className="mt-2 flex items-center justify-between gap-3">
+                  <p className="text-[11px] text-slate-500">
+                    {rankedDraftModels.all.length
+                      ? `Showing ${visibleDraftModels.length} model(s) ${showAllDraftModels ? "(all)" : "(recommended)"} out of ${rankedDraftModels.all.length}.`
+                      : "Type model manually or fetch from API key."}
+                  </p>
+                  <div className="flex items-center gap-2">
+                    {rankedDraftModels.all.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setShowAllDraftModels((prev) => !prev)}
+                        className="rounded-lg border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-[10px] font-bold uppercase tracking-wide text-ink hover:bg-slate-50 dark:hover:bg-slate-800"
+                      >
+                        {showAllDraftModels ? "Show Recommended" : "Show All"}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => void fetchAndApplyModelsForDraft(true)}
+                      disabled={loadingDraftModels || !providerKeyDraft.trim()}
+                      className="rounded-lg border border-slate-300 dark:border-slate-700 px-3 py-1.5 text-[10px] font-bold uppercase tracking-wide text-ink hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50"
+                    >
+                      {loadingDraftModels ? "Loading..." : "Fetch Models"}
+                    </button>
+                  </div>
                 </div>
               </label>
 
@@ -572,6 +755,7 @@ export function SettingsPage() {
                     className="flex-1 rounded-xl border border-slate-300 dark:border-slate-700 px-4 py-2.5 focus:border-brand outline-none bg-bg dark:bg-slate-900/50 text-ink"
                     value={providerKeyDraft}
                     onChange={(e) => setProviderKeyDraft(e.target.value)}
+                    onBlur={() => void fetchAndApplyModelsForDraft(false)}
                     placeholder="Paste your key here..."
                   />
                   <button
@@ -584,7 +768,7 @@ export function SettingsPage() {
                   </button>
                   <button
                     type="button"
-                    onClick={saveProviderKey}
+                    onClick={() => void saveProviderKey()}
                     disabled={savingAI}
                     className="px-4 py-2.5 rounded-xl bg-brand text-white text-xs font-bold uppercase tracking-wide shadow-lg shadow-brand/20 hover:bg-brand/90 disabled:opacity-60"
                   >
@@ -617,6 +801,8 @@ export function SettingsPage() {
                   <option value="siliconflow">Silicon Flow</option>
                   <option value="openai">OpenAI</option>
                   <option value="openrouter">OpenRouter</option>
+                  <option value="together">Together</option>
+                  <option value="anthropic">Anthropic</option>
                 </select>
                 <input
                   placeholder="Label (e.g. My Free Key)"
@@ -632,7 +818,7 @@ export function SettingsPage() {
                   onChange={e => setNewKeyValue(e.target.value)}
                 />
                 <button
-                  onClick={addKeyToPool}
+                  onClick={() => void addKeyToPool()}
                   className="rounded-lg bg-brand text-white text-xs font-bold py-2 hover:bg-brand/90 transition-colors"
                 >
                   Add to Vault
@@ -672,6 +858,9 @@ export function SettingsPage() {
                             </span>
                           )}
                         </div>
+                        <p className="mt-1 text-[10px] text-slate-500">
+                          Fallback: Key Model -&gt; Active Model ID -&gt; Provider Defaults
+                        </p>
                       </div>
                     </div>
                     <div className="flex items-start gap-3 mt-3 sm:mt-0">

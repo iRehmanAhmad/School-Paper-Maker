@@ -1,4 +1,4 @@
-import { FormEvent, KeyboardEvent, useEffect, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   addChapters,
@@ -17,8 +17,8 @@ import {
   updateSubjectName,
   updateSubjectOutlineStatus,
 } from "@/services/repositories";
-import { generateSubjectOutlineFromText } from "@/services/ai";
 import { extractPdfText } from "@/services/pdfText";
+import { extractSubjectOutlineDraft } from "@/services/subjectOutlineImport";
 import { canUseSupabase, supabase } from "@/services/supabase";
 import { ConfirmModal } from "@/components/ConfirmModal";
 import { ContextBreadcrumbs } from "@/components/ContextBreadcrumbs";
@@ -28,7 +28,7 @@ import { useHierarchyScopeParams } from "@/hooks/useHierarchyScopeParams";
 import { useUndoDeleteQueue } from "@/hooks/useUndoDeleteQueue";
 import { useAppStore } from "@/store/useAppStore";
 import { hierarchyScopeToSearch } from "@/utils/hierarchyScope";
-import type { ClassEntity, ExamBody, SubjectEntity, SubjectOutline } from "@/types/domain";
+import type { ClassEntity, ExamBody, SubjectEntity, SubjectOutline, SubjectOutlineChapter } from "@/types/domain";
 
 const pakistanSubjects = [
   "Urdu",
@@ -86,6 +86,7 @@ export function SubjectsPage() {
   const [classes, setClasses] = useState<ClassEntity[]>([]);
   const [examBodies, setExamBodies] = useState<ExamBody[]>([]);
   const [rows, setRows] = useState<SubjectEntity[]>([]);
+  const [chapterCountBySubject, setChapterCountBySubject] = useState<Record<string, number>>({});
   const [examBodyId, setExamBodyId] = useState("");
   const [classId, setClassId] = useState("");
   const [name, setName] = useState("");
@@ -95,6 +96,7 @@ export function SubjectsPage() {
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; message: string } | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [classSort, setClassSort] = useState<"asc" | "desc">("asc");
+  const [classSearch, setClassSearch] = useState("");
   const [subjectFile, setSubjectFile] = useState<File | null>(null);
   const [autoAnalyzePdf, setAutoAnalyzePdf] = useState(true);
   const [outlineDraft, setOutlineDraft] = useState<SubjectOutline | null>(null);
@@ -109,8 +111,6 @@ export function SubjectsPage() {
   const [ocrTesting, setOcrTesting] = useState(false);
   const [ocrPreview, setOcrPreview] = useState("");
   const [outlineRegenerating, setOutlineRegenerating] = useState(false);
-  const [outlinePrompt, setOutlinePrompt] = useState("");
-  const [unitsOnly, setUnitsOnly] = useState(false);
   const [useOcrCache, setUseOcrCache] = useState(true);
   const [textOnly, setTextOnly] = useState(false);
   const [lastOutlineFileName, setLastOutlineFileName] = useState("");
@@ -165,9 +165,21 @@ export function SubjectsPage() {
       mergeScope({ examBodyId: selectedBody || undefined, classId: firstClassId, subjectId: undefined, chapterId: undefined });
     }
     if (classRows.length) {
-      setRows(await getSubjects(classRows.map((c) => c.id)));
+      const subjectRows = await getSubjects(classRows.map((c) => c.id));
+      setRows(subjectRows);
+      if (subjectRows.length) {
+        const chapters = await getChapters(subjectRows.map((s) => s.id));
+        const chapterCounts = chapters.reduce<Record<string, number>>((acc, chapter) => {
+          acc[chapter.subject_id] = (acc[chapter.subject_id] || 0) + 1;
+          return acc;
+        }, {});
+        setChapterCountBySubject(chapterCounts);
+      } else {
+        setChapterCountBySubject({});
+      }
     } else {
       setRows([]);
+      setChapterCountBySubject({});
     }
   }
 
@@ -190,9 +202,7 @@ export function SubjectsPage() {
       if (!bodyId) {
         throw new Error("Select an exam body before analyzing the PDF");
       }
-      const examBodyName = examBodies.find((item) => item.id === bodyId)?.name || "Exam Body";
-      const className = classRow?.name || "Class";
-      const textLimit = unitsOnly ? 250000 : 40000;
+      const textLimit = 250000;
       const text = await extractPdfText(file, textLimit, {
         ocrPages,
         ocrLang,
@@ -205,14 +215,10 @@ export function SubjectsPage() {
       if (!text) {
         throw new Error("No readable text found in this PDF");
       }
-      const outline = await generateSubjectOutlineFromText({
-        examBody: examBodyName,
-        className,
-        subjectName: subject.name,
-        text,
-        instructions: outlinePrompt.trim() || undefined,
-        unitsOnly,
-      });
+      const outline = extractSubjectOutlineDraft(text);
+      if (!outline.length) {
+        throw new Error("No chapter headings were detected. Use Text Preview to verify the PDF text, then add chapters manually if needed.");
+      }
 
       let sourcePath: string | null = null;
       if (canUseSupabase() && supabase) {
@@ -238,7 +244,7 @@ export function SubjectsPage() {
 
       setOutlineDraft(draft);
       setOutlineSelectedTitles(draft.outline.map((ch) => ch.title));
-      toast("success", "AI outline ready. Review and create chapters.");
+      toast("success", "Outline draft ready. Review and create chapters.");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to analyze subject PDF";
       setOutlineError(message);
@@ -342,13 +348,14 @@ export function SubjectsPage() {
 
   async function applyOutlineDraft() {
     if (!outlineDraft) return;
-    if (!outlineSelectedTitles.length) {
+    const selectedTitles = outlineSelectedTitles.map((item) => item.trim()).filter(Boolean);
+    if (!selectedTitles.length) {
       toast("error", "Select at least one chapter to add");
       return;
     }
     setOutlineApplying(true);
     try {
-      const selected = outlineDraft.outline.filter((ch) => outlineSelectedTitles.includes(ch.title));
+      const selected = outlineDraft.outline.filter((ch) => selectedTitles.includes(ch.title.trim()) && ch.title.trim());
       const existingChapters = await getChapters([outlineDraft.subject_id]);
       const chapterByTitle = new Map(existingChapters.map((ch) => [normalizeText(ch.title), ch]));
       let nextNumber = existingChapters.reduce((max, ch) => Math.max(max, ch.chapter_number), 0) + 1;
@@ -407,6 +414,59 @@ export function SubjectsPage() {
     } finally {
       setOutlineApplying(false);
     }
+  }
+
+  function updateDraftChapter(index: number, updater: (chapter: SubjectOutlineChapter) => SubjectOutlineChapter) {
+    setOutlineDraft((prev) => {
+      if (!prev) return prev;
+      const nextOutline = prev.outline.map((chapter, chapterIndex) => (
+        chapterIndex === index ? updater(chapter) : chapter
+      ));
+      return { ...prev, outline: nextOutline };
+    });
+  }
+
+  function renameDraftChapter(index: number, nextTitle: string) {
+    setOutlineDraft((prev) => {
+      if (!prev) return prev;
+      const current = prev.outline[index];
+      if (!current) return prev;
+      const cleanedTitle = nextTitle.trim();
+      const nextOutline = [...prev.outline];
+      nextOutline[index] = { ...current, title: cleanedTitle };
+      setOutlineSelectedTitles((selected) => selected.map((item) => (item === current.title ? cleanedTitle : item)));
+      return { ...prev, outline: nextOutline };
+    });
+  }
+
+  function updateDraftTopics(index: number, rawValue: string) {
+    updateDraftChapter(index, (chapter) => ({
+      ...chapter,
+      topics: rawValue
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean),
+    }));
+  }
+
+  function removeDraftChapter(index: number) {
+    setOutlineDraft((prev) => {
+      if (!prev) return prev;
+      const current = prev.outline[index];
+      if (!current) return prev;
+      setOutlineSelectedTitles((selected) => selected.filter((item) => item !== current.title));
+      return { ...prev, outline: prev.outline.filter((_, chapterIndex) => chapterIndex !== index) };
+    });
+  }
+
+  function addDraftChapter() {
+    setOutlineDraft((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        outline: [...prev.outline, { title: "", topics: [] }],
+      };
+    });
   }
 
   async function submit(e: FormEvent) {
@@ -500,9 +560,22 @@ export function SubjectsPage() {
     const res = a.name.localeCompare(b.name);
     return classSort === "asc" ? res : -res;
   });
+  const classSearchNeedle = classSearch.trim().toLowerCase();
+  const visibleClasses = sortedClasses.filter((row) => row.name.toLowerCase().includes(classSearchNeedle));
   const selectedBodyName = examBodies.find((item) => item.id === examBodyId)?.name;
   const selectedClassName = classes.find((item) => item.id === classId)?.name;
   const selectedScopeSubjectName = rows.find((item) => item.id === scope.subjectId)?.name;
+  const classNameById = useMemo(() => Object.fromEntries(classes.map((item) => [item.id, item.name])), [classes]);
+  const normalizedName = name.trim().toLowerCase();
+  const duplicateRow = classId && normalizedName ? rows.find((row) => row.class_id === classId && row.name.trim().toLowerCase() === normalizedName) : null;
+  const canAdd = Boolean(profile?.school_id && classId && name.trim() && !duplicateRow);
+
+  function formatDateShort(value?: string) {
+    if (!value) return "-";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "-";
+    return date.toLocaleDateString();
+  }
 
   return (
     <div className="space-y-4">
@@ -569,15 +642,16 @@ export function SubjectsPage() {
         <label className="text-xs font-semibold text-slate-600">
           Class
           <select
-            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
+            className={`mt-1 w-full rounded-lg border px-3 py-2 ${!examBodyId ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400" : "border-slate-300"}`}
             value={classId}
             onChange={(e) => {
               const nextClass = e.target.value;
               setClassId(nextClass);
               mergeScope({ examBodyId: examBodyId || undefined, classId: nextClass || undefined, subjectId: undefined, chapterId: undefined });
             }}
+            disabled={!examBodyId}
           >
-            <option value="">All Classes</option>
+            <option value="">{examBodyId ? "All Classes" : "Select Exam Body First"}</option>
             {classes.map((c) => <option value={c.id} key={c.id}>{c.name}</option>)}
           </select>
         </label>
@@ -592,7 +666,12 @@ export function SubjectsPage() {
             placeholder="Subject name (type then Tab to autocomplete)"
           />
         </label>
-        <button className="rounded-lg bg-brand px-4 py-2 text-white">Add Subject</button>
+        <button disabled={!canAdd} className="rounded-lg bg-brand px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-60">Add Subject</button>
+        {duplicateRow ? (
+          <div className="lg:col-span-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700">
+            Already exists in this class: {duplicateRow.name}
+          </div>
+        ) : null}
         <div className="lg:col-span-4 grid gap-2 md:grid-cols-[1fr_auto]">
           <label className="text-xs font-semibold text-slate-600">
             Subject PDF (optional)
@@ -610,8 +689,12 @@ export function SubjectsPage() {
               checked={autoAnalyzePdf}
               onChange={(e) => setAutoAnalyzePdf(e.target.checked)}
             />
-            Analyze PDF after adding subject
+            Extract chapter draft after adding subject
           </label>
+        </div>
+        <div className="lg:col-span-4 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-800">
+          Safe import mode reads the PDF text, detects likely chapter headings, and lets you review them before creating chapters.
+          It does not trust AI to invent the syllabus.
         </div>
         <div className="lg:col-span-4 grid gap-2 md:grid-cols-[180px_1fr]">
           <label className="text-xs font-semibold text-slate-600">
@@ -637,28 +720,10 @@ export function SubjectsPage() {
               <option value="eng+urd">English + Urdu</option>
             </select>
             <span className="mt-1 block text-[11px] text-slate-500">
-              OCR downloads language data on first use and may take a moment.
+              Only used when the PDF is scanned or its text layer is weak.
             </span>
           </label>
         </div>
-        <label className="lg:col-span-4 text-xs font-semibold text-slate-600">
-          Custom AI Prompt (optional)
-          <textarea
-            className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-xs"
-            rows={2}
-            value={outlinePrompt}
-            onChange={(e) => setOutlinePrompt(e.target.value)}
-            placeholder="Example: Use textbook headings. Keep 6-8 topics per chapter. Prefer short titles."
-          />
-        </label>
-        <label className="lg:col-span-4 flex items-center gap-2 text-xs font-semibold text-slate-600">
-          <input
-            type="checkbox"
-            checked={unitsOnly}
-            onChange={(e) => setUnitsOnly(e.target.checked)}
-          />
-          Units only (no topics)
-        </label>
         <label className="lg:col-span-4 flex items-center gap-2 text-xs font-semibold text-slate-600">
           <input
             type="checkbox"
@@ -722,10 +787,6 @@ export function SubjectsPage() {
           </div>
         ) : null}
       </form>
-      <label className="block text-xs font-semibold text-slate-600">
-        Search Subject
-        <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Type to filter subjects" />
-      </label>
       <div className="grid gap-4 lg:grid-cols-[240px_1fr]">
         <div className="rounded-xl border border-slate-200 bg-white p-3">
           <div className="flex items-center justify-between">
@@ -736,14 +797,26 @@ export function SubjectsPage() {
               className="rounded-lg border border-slate-200 px-2 py-1 text-[10px] font-semibold text-slate-600 hover:border-brand hover:text-brand"
               title="Toggle sort order"
             >
-              {classSort === "asc" ? "A–Z" : "Z–A"}
+              {classSort === "asc" ? "A-Z" : "Z-A"}
             </button>
           </div>
+          <label className="mt-2 block text-xs font-semibold text-slate-600">
+            Search Class
+            <input
+              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-xs"
+              value={classSearch}
+              onChange={(e) => setClassSearch(e.target.value)}
+              placeholder="Type class name"
+            />
+          </label>
+          <p className="mt-2 text-[11px] text-slate-500">
+            {visibleClasses.length} of {sortedClasses.length} shown
+          </p>
           <div className="mt-2 space-y-2">
-            {sortedClasses.length === 0 ? (
+            {visibleClasses.length === 0 ? (
               <p className="text-xs text-slate-400">No classes found</p>
             ) : (
-              sortedClasses.map((c) => (
+              visibleClasses.map((c) => (
                 <button
                   key={c.id}
                   type="button"
@@ -761,12 +834,23 @@ export function SubjectsPage() {
             )}
           </div>
         </div>
-        <div className="rounded-xl border border-slate-200 bg-white">
+        <div className="rounded-xl border border-slate-200 bg-white p-3">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold uppercase tracking-wider text-slate-500">Existing Subjects</h3>
+            <p className="text-xs text-slate-500">{filteredRows.length} of {rows.length} shown</p>
+          </div>
+          <label className="w-full max-w-sm text-xs font-semibold text-slate-600">
+            Search Subject
+            <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Type to filter subjects" />
+          </label>
+        </div>
+        <div className="mt-3 space-y-2">
         {filteredRows.length === 0 ? (
           <EmptyState title="No subjects found" description="Add subjects for this class to continue chapter and question setup." />
         ) : (
           filteredRows.map((row) => (
-            <div key={row.id} className="flex items-center justify-between border-b border-slate-100 px-4 py-3 text-sm last:border-b-0">
+            <article key={row.id} className="rounded-xl border border-slate-200 bg-slate-50/30 p-3 text-sm">
               {editId === row.id ? (
                 <div className="flex w-full items-center gap-2">
                   <input className="w-full rounded-lg border border-slate-300 px-3 py-2" value={editName} onChange={(e) => setEditName(e.target.value)} />
@@ -790,51 +874,47 @@ export function SubjectsPage() {
                 </div>
               ) : (
                 <>
-                  <span>{row.name}</span>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const parentClass = classes.find((item) => item.id === row.class_id);
-                        const parentExamBodyId = parentClass?.exam_body_id || examBodyId || undefined;
-                        setExamBodyId(parentExamBodyId || "");
-                        setClassId(row.class_id);
-                        mergeScope({
-                          examBodyId: parentExamBodyId,
-                          classId: row.class_id,
-                          subjectId: row.id,
-                          chapterId: undefined,
-                        });
-                        toast("success", "Context set to this subject");
-                      }}
-                      className="rounded bg-indigo-100 px-2 py-1 text-xs font-semibold text-indigo-700"
-                    >
-                      Use Context
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setEditId(row.id);
-                        setEditName(row.name);
-                      }}
-                      className="rounded bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-700"
-                    >
-                      Edit
-                    </button>
-                    <button type="button" onClick={() => removeSubject(row.id)} className="rounded bg-red-100 px-2 py-1 text-xs font-semibold text-red-700">
-                      Remove
-                    </button>
+                  <div className="flex items-start justify-between gap-2">
+                    <h4 className="truncate text-sm font-bold text-slate-800">
+                      {row.name}
+                      <span className="ml-1 text-[11px] font-medium text-slate-500">
+                        ({classNameById[row.class_id] || "Class"}, Updated {formatDateShort(row.created_at)})
+                      </span>
+                    </h4>
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 pt-2">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-700">
+                        Total Chapters: {chapterCountBySubject[row.id] || 0}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditId(row.id);
+                          setEditName(row.name);
+                        }}
+                        className="rounded bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-700"
+                      >
+                        Edit
+                      </button>
+                      <button type="button" onClick={() => removeSubject(row.id)} className="rounded bg-red-100 px-2 py-1 text-xs font-semibold text-red-700">
+                        Remove
+                      </button>
+                    </div>
                   </div>
                 </>
               )}
-            </div>
+            </article>
           ))
         )}
+        </div>
         </div>
       </div>
       {outlineLoading && (
         <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-xs font-semibold text-slate-600">
-          {outlineProgress || "Analyzing PDF and preparing outline..."}
+          {outlineProgress || "Reading PDF and preparing outline draft..."}
           {outlineProgressValue > 0 && (
             <div className="mt-2 h-2 w-full rounded-full bg-slate-100">
               <div
@@ -854,22 +934,32 @@ export function SubjectsPage() {
         <div className="rounded-xl border border-slate-200 bg-white p-4">
           <div className="flex flex-wrap items-start justify-between gap-2">
             <div>
-              <h3 className="text-sm font-bold text-slate-700">AI Outline Draft</h3>
+              <h3 className="text-sm font-bold text-slate-700">Imported Outline Draft</h3>
               <p className="text-xs text-slate-500">
-                Source: {outlineDraft.source_name} • Status: {outlineDraft.status}
+                Source: {outlineDraft.source_name} | Status: {outlineDraft.status}
               </p>
               {lastOutlineFileName ? (
                 <p className="text-[11px] text-slate-400">Analyzed file: {lastOutlineFileName}</p>
               ) : null}
+              <p className="mt-1 text-[11px] text-slate-500">
+                Review the detected chapter names. Edit anything that looks wrong before creating chapters.
+              </p>
             </div>
             <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={addDraftChapter}
+                className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700"
+              >
+                Add Row
+              </button>
               <button
                 type="button"
                 onClick={regenerateOutline}
                 disabled={outlineRegenerating || outlineLoading}
                 className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 disabled:opacity-60"
               >
-                {outlineRegenerating ? "Regenerating..." : "Regenerate outline"}
+                {outlineRegenerating ? "Re-extracting..." : "Re-extract from PDF"}
               </button>
               <button
                 type="button"
@@ -882,27 +972,59 @@ export function SubjectsPage() {
             </div>
           </div>
           <div className="mt-3 space-y-3">
-            {outlineDraft.outline.map((chapter) => {
+            {outlineDraft.outline.map((chapter, index) => {
               const checked = outlineSelectedTitles.includes(chapter.title);
               return (
-                <label key={chapter.title} className="flex items-start gap-3 rounded-lg border border-slate-100 px-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={(e) => {
-                      setOutlineSelectedTitles((prev) =>
-                        e.target.checked ? [...prev, chapter.title] : prev.filter((title) => title !== chapter.title),
-                      );
-                    }}
-                    disabled={outlineDraft.status === "approved"}
-                  />
-                  <div>
-                    <p className="text-sm font-semibold text-slate-700">{chapter.title}</p>
-                    <p className="text-xs text-slate-500">
-                      {chapter.topics?.length ? chapter.topics.join(", ") : "No topics suggested"}
-                    </p>
+                <div key={`${chapter.title}-${index}`} className="rounded-lg border border-slate-100 px-3 py-3">
+                  <div className="flex items-start gap-3">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(e) => {
+                        setOutlineSelectedTitles((prev) => (
+                          e.target.checked
+                            ? [...prev, chapter.title]
+                            : prev.filter((title) => title !== chapter.title)
+                        ));
+                      }}
+                      disabled={outlineDraft.status === "approved"}
+                      className="mt-1"
+                    />
+                    <div className="grid flex-1 gap-3 md:grid-cols-[1.1fr_1fr_auto]">
+                      <label className="text-xs font-semibold text-slate-600">
+                        Chapter Title
+                        <input
+                          className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-700"
+                          value={chapter.title}
+                          onChange={(e) => renameDraftChapter(index, e.target.value)}
+                          disabled={outlineDraft.status === "approved"}
+                          placeholder="Enter chapter title"
+                        />
+                      </label>
+                      <label className="text-xs font-semibold text-slate-600">
+                        Topic Hints (comma separated)
+                        <textarea
+                          className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-700"
+                          rows={2}
+                          value={chapter.topics.join(", ")}
+                          onChange={(e) => updateDraftTopics(index, e.target.value)}
+                          disabled={outlineDraft.status === "approved"}
+                          placeholder="Optional topic hints"
+                        />
+                      </label>
+                      <div className="flex items-end">
+                        <button
+                          type="button"
+                          onClick={() => removeDraftChapter(index)}
+                          disabled={outlineDraft.status === "approved"}
+                          className="rounded-lg border border-rose-200 px-3 py-2 text-xs font-semibold text-rose-700 disabled:opacity-60"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </div>
                   </div>
-                </label>
+                </div>
               );
             })}
           </div>

@@ -304,6 +304,66 @@ export async function getSubscriptionSummary(schoolId: string): Promise<Subscrip
   return summaryFromRows(subscription, plan);
 }
 
+export async function getSubscriptionSummaries(schoolIds: string[]): Promise<Record<string, SubscriptionSummary>> {
+  const uniqueIds = Array.from(new Set(schoolIds.filter(Boolean)));
+  const summaries: Record<string, SubscriptionSummary> = {};
+  if (!uniqueIds.length) {
+    return summaries;
+  }
+
+  const plans = await getSubscriptionPlans();
+  const basicPlan = plans.find((row) => row.code === "basic") || plans[0] || DEFAULT_BASIC_PLAN;
+
+  if (canUseSupabase() && getSubsAvail()) {
+    try {
+      const { data, error } = await supabase
+        .from("subscriptions")
+        .select("*")
+        .in("school_id", uniqueIds);
+      if (error) {
+        if (isMissingTableError(error)) {
+          setSubsAvail(false);
+        } else {
+          throw error;
+        }
+      } else {
+        const rows = (data ?? []) as Subscription[];
+        const bySchool = new Map<string, Subscription>();
+        for (const row of rows) {
+          const existing = bySchool.get(row.school_id);
+          const existingTs = existing ? Date.parse(existing.updated_at || existing.created_at) : -1;
+          const rowTs = Date.parse(row.updated_at || row.created_at);
+          if (!existing || rowTs >= existingTs) {
+            bySchool.set(row.school_id, row);
+          }
+        }
+        for (const schoolId of uniqueIds) {
+          const subscription = bySchool.get(schoolId) || null;
+          const plan = plans.find((row) => row.id === subscription?.plan_id) || basicPlan;
+          summaries[schoolId] = summaryFromRows(subscription, plan);
+        }
+        setSubsAvail(true);
+        return summaries;
+      }
+    } catch (err) {
+      if (isMissingTableError(err)) {
+        setSubsAvail(false);
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  ensureSeed();
+  const localSubs = readLocal<Subscription>(DB.subscriptions);
+  for (const schoolId of uniqueIds) {
+    const subscription = localSubs.find((row) => row.school_id === schoolId) || null;
+    const plan = plans.find((row) => row.id === subscription?.plan_id) || basicPlan;
+    summaries[schoolId] = summaryFromRows(subscription, plan);
+  }
+  return summaries;
+}
+
 export async function assertCanGeneratePaper(schoolId: string, requestedSets: number) {
   const summary = await getSubscriptionSummary(schoolId);
   if (!summary.isActive) {

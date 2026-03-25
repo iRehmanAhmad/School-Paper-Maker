@@ -58,6 +58,29 @@ export async function getPapersByTeacher(teacherId: string) {
     return readLocal<Paper>(DB.papers).filter((p) => p.teacher_id === teacherId).sort((a, b) => b.created_at.localeCompare(a.created_at));
 }
 
+export async function getPapersBySchool(schoolId: string) {
+    ensureSeed();
+    const classIds = (await getClasses(schoolId)).map((row) => row.id);
+    if (!classIds.length) {
+        return [] as Paper[];
+    }
+    if (canUseSupabase()) {
+        const { data, error } = await supabase
+            .from("papers")
+            .select("*")
+            .in("class_id", classIds)
+            .order("created_at", { ascending: false })
+            .limit(300);
+        if (error) {
+            throw error;
+        }
+        return (data ?? []) as Paper[];
+    }
+    return readLocal<Paper>(DB.papers)
+        .filter((p) => classIds.includes(p.class_id))
+        .sort((a, b) => b.created_at.localeCompare(a.created_at));
+}
+
 export async function getPaperBundleById(paperId: string): Promise<any | null> {
     ensureSeed();
     let paper: Paper | undefined;
@@ -131,13 +154,14 @@ export async function getPaperBundleById(paperId: string): Promise<any | null> {
     };
 }
 
-export async function getStats(schoolId: string, teacherId: string) {
+export async function getStats(schoolId: string, teacherId?: string) {
+    const papersPromise = teacherId ? getPapersByTeacher(teacherId) : getPapersBySchool(schoolId);
     const [questions, classes, subjects, chapters, papers] = await Promise.all([
         getQuestions(schoolId),
         getClasses(schoolId),
         getSubjects((await getClasses(schoolId)).map((c) => c.id)),
         getChapters((await getSubjects((await getClasses(schoolId)).map((c) => c.id))).map((s) => s.id)),
-        getPapersByTeacher(teacherId),
+        papersPromise,
     ]);
 
     return {
