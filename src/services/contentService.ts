@@ -55,7 +55,7 @@ function applySourceFilters(rows: ContentSource[], filters?: ContentSourceScopeF
 export async function getContentSources(schoolId: string, filters?: ContentSourceScopeFilters) {
   ensureSeed();
   if (canUseSupabase()) {
-    let query = supabase
+    let query = supabase!
       .from("content_sources")
       .select("*")
       .eq("school_id", schoolId)
@@ -77,7 +77,7 @@ export async function getContentSources(schoolId: string, filters?: ContentSourc
 export async function getContentSourceById(sourceId: string) {
   ensureSeed();
   if (canUseSupabase()) {
-    const { data, error } = await supabase.from("content_sources").select("*").eq("id", sourceId).single();
+    const { data, error } = await supabase!.from("content_sources").select("*").eq("id", sourceId).single();
     if (error) throw error;
     return data as ContentSource;
   }
@@ -130,7 +130,7 @@ export async function addContentSource(input: CreateContentSourceInput) {
       error_message: null,
       created_by: input.created_by,
     };
-    const { data, error } = await supabase.from("content_sources").insert(payload).select("*").single();
+    const { data, error } = await supabase!.from("content_sources").insert(payload).select("*").single();
     if (error) throw error;
     return data as ContentSource;
   }
@@ -182,7 +182,7 @@ export async function updateContentSourceStatus(
   patch?: { pages?: number | null; error_message?: string | null }
 ) {
   if (canUseSupabase()) {
-    const { data, error } = await supabase
+    const { data, error } = await supabase!
       .from("content_sources")
       .update({ status, pages: patch?.pages ?? null, error_message: patch?.error_message ?? null })
       .eq("id", sourceId)
@@ -205,12 +205,58 @@ export async function updateContentSourceStatus(
   return row;
 }
 
+export async function updateContentSourceFilePath(sourceId: string, filePath: string) {
+  if (canUseSupabase()) {
+    const { data, error } = await supabase!
+      .from("content_sources")
+      .update({ file_path: filePath })
+      .eq("id", sourceId)
+      .select("*")
+      .single();
+    if (error) throw error;
+    return data as ContentSource;
+  }
+  const rows = readLocal<ContentSource>(DB.contentSources);
+  const row = rows.find((item) => item.id === sourceId);
+  if (!row) throw new Error("Content source not found");
+  row.file_path = filePath;
+  writeLocal(DB.contentSources, rows);
+  return row;
+}
+
 export async function deleteContentSource(sourceId: string) {
   if (canUseSupabase()) {
-    const { error } = await supabase.from("content_sources").delete().eq("id", sourceId);
-    if (error) throw error;
+    // 1. Fetch source to get file_path for storage cleanup
+    const { data: source, error: fetchError } = await supabase!
+      .from("content_sources")
+      .select("file_path")
+      .eq("id", sourceId)
+      .single();
+    
+    // 2. Delete from Storage if it's a cloud path
+    if (source?.file_path && String(source.file_path).includes("/")) {
+      const slashIdx = String(source.file_path).indexOf("/");
+      const bucket = String(source.file_path).slice(0, slashIdx);
+      const objectPath = String(source.file_path).slice(slashIdx + 1);
+      
+      try {
+        await supabase!.storage.from(bucket).remove([objectPath]);
+      } catch (err) {
+        console.error("Cleanup warning: Failed to delete storage file:", err);
+        // Continue DB deletion anyway
+      }
+    }
+
+    // 3. Delete DB record (will cascade-delete chunks if set in DB, else we do it)
+    const { error: deleteError } = await supabase!.from("content_sources").delete().eq("id", sourceId);
+    if (deleteError) throw deleteError;
+    
+    // 4. Manually cleanup chunks just in case DB cascade is not set
+    await supabase!.from("content_chunks").delete().eq("source_id", sourceId);
+    
     return;
   }
+  
   writeLocal(DB.contentSources, readLocal<ContentSource>(DB.contentSources).filter((row) => row.id !== sourceId));
   writeLocal(DB.contentChunks, readLocal<ContentChunk>(DB.contentChunks).filter((row) => row.source_id !== sourceId));
 }
@@ -218,7 +264,7 @@ export async function deleteContentSource(sourceId: string) {
 export async function getContentChunksBySource(sourceId: string) {
   ensureSeed();
   if (canUseSupabase()) {
-    const { data, error } = await supabase
+    const { data, error } = await supabase!
       .from("content_chunks")
       .select("*")
       .eq("source_id", sourceId)
@@ -231,10 +277,41 @@ export async function getContentChunksBySource(sourceId: string) {
     .sort((a, b) => a.chunk_no - b.chunk_no);
 }
 
+export async function getContentChunkCountsBySources(sourceIds: string[]) {
+  ensureSeed();
+  const ids = Array.from(new Set((sourceIds || []).map((id) => String(id || "").trim()).filter(Boolean)));
+  if (!ids.length) return {} as Record<string, number>;
+
+  if (canUseSupabase()) {
+    const { data, error } = await supabase!
+      .from("content_chunks")
+      .select("source_id")
+      .in("source_id", ids);
+    if (error) throw error;
+    const map: Record<string, number> = {};
+    for (const id of ids) map[id] = 0;
+    for (const row of data ?? []) {
+      const sourceId = String((row as { source_id?: string }).source_id || "");
+      if (!sourceId) continue;
+      map[sourceId] = (map[sourceId] || 0) + 1;
+    }
+    return map;
+  }
+
+  const idSet = new Set(ids);
+  const map: Record<string, number> = {};
+  for (const id of ids) map[id] = 0;
+  for (const row of readLocal<ContentChunk>(DB.contentChunks)) {
+    if (!idSet.has(row.source_id)) continue;
+    map[row.source_id] = (map[row.source_id] || 0) + 1;
+  }
+  return map;
+}
+
 export async function addContentChunks(rows: CreateContentChunkInput[]) {
   if (!rows.length) return [] as ContentChunk[];
   if (canUseSupabase()) {
-    const { data, error } = await supabase.from("content_chunks").insert(rows).select("*");
+    const { data, error } = await supabase!.from("content_chunks").insert(rows).select("*");
     if (error) throw error;
     return (data ?? []) as ContentChunk[];
   }
@@ -261,7 +338,7 @@ export async function searchContentChunks(params: ChunkSearchParams) {
   ensureSeed();
 
   if (canUseSupabase()) {
-    let query = supabase
+    let query = supabase!
       .from("content_chunks")
       .select("*")
       .eq("school_id", params.school_id)

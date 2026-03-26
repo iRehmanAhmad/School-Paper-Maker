@@ -38,6 +38,7 @@ type UpdateJobPatch = Partial<
 
 type CandidateFilters = {
   job_id?: string;
+  job_ids?: string[];
   artifact?: ArtifactType;
   status?: CandidateStatus;
 };
@@ -189,6 +190,7 @@ export async function updateGenerationJob(jobId: string, patch: UpdateJobPatch) 
 
 export async function getGenerationCandidates(schoolId: string, filters?: CandidateFilters) {
   ensureSeed();
+  const scopedJobIds = Array.from(new Set((filters?.job_ids || []).map((id) => String(id || "").trim()).filter(Boolean)));
   if (canUseSupabase()) {
     let query = supabase
       .from("generation_candidates")
@@ -196,6 +198,7 @@ export async function getGenerationCandidates(schoolId: string, filters?: Candid
       .eq("school_id", schoolId)
       .order("created_at", { ascending: false });
     if (filters?.job_id) query = query.eq("job_id", filters.job_id);
+    if (scopedJobIds.length) query = query.in("job_id", scopedJobIds);
     if (filters?.artifact) query = query.eq("artifact", filters.artifact);
     if (filters?.status) query = query.eq("status", filters.status);
     const { data, error } = await query;
@@ -205,6 +208,10 @@ export async function getGenerationCandidates(schoolId: string, filters?: Candid
 
   let rows = readLocal<GenerationCandidate>(DB.generationCandidates).filter((row) => row.school_id === schoolId);
   if (filters?.job_id) rows = rows.filter((row) => row.job_id === filters.job_id);
+  if (scopedJobIds.length) {
+    const idSet = new Set(scopedJobIds);
+    rows = rows.filter((row) => idSet.has(row.job_id));
+  }
   if (filters?.artifact) rows = rows.filter((row) => row.artifact === filters.artifact);
   if (filters?.status) rows = rows.filter((row) => row.status === filters.status);
   return rows.sort((a, b) => b.created_at.localeCompare(a.created_at));

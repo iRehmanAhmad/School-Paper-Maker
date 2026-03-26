@@ -1,5 +1,5 @@
 import { FormEvent } from "react";
-import { FileUp, Database, Eye, Trash2, FileText, ChevronRight } from "lucide-react";
+import { FileUp, Database, Eye, Trash2, FileText, ChevronRight, Cloud, MoreVertical, AlertCircle } from "lucide-react";
 import type { ContentSource, ContentChunk } from "@/types/domain";
 
 interface SourceManagerProps {
@@ -24,6 +24,12 @@ interface SourceManagerProps {
   totalChunkCount: number;
   ingestedSourceCount: number;
   isPdfSource: (s: any) => boolean;
+  canUseSupabase: boolean;
+  pushSourceToCloud: (source: ContentSource, file: File) => Promise<void>;
+  uploadingToCloud: Record<string, boolean>;
+  onDeleteSource: (id: string) => Promise<void>;
+  onIngestAll: () => Promise<void>;
+  ingestingAll: boolean;
 }
 
 export function SourceManager({
@@ -48,7 +54,16 @@ export function SourceManager({
   totalChunkCount,
   ingestedSourceCount,
   isPdfSource,
+  canUseSupabase,
+  pushSourceToCloud,
+  uploadingToCloud,
+  onDeleteSource,
+  onIngestAll,
+  ingestingAll,
 }: SourceManagerProps) {
+  const pendingIngestCount = sources.filter((source) => source.status !== "ready").length;
+  const canIngestAll = pendingIngestCount > 0 && !ingestingAll && !ingestingSourceId;
+
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
       {/* Readiness Brief */}
@@ -159,10 +174,11 @@ export function SourceManager({
               </h2>
               {sources.length > 0 && (
                 <button 
-                  onClick={() => {/* Ingest All logic */}}
-                  className="text-xs font-bold text-brand hover:underline"
+                  onClick={() => void onIngestAll()}
+                  disabled={!canIngestAll}
+                  className="text-xs font-bold text-brand hover:underline disabled:opacity-50 disabled:no-underline"
                 >
-                  Ingest All
+                  {ingestingAll ? "Ingesting..." : `Ingest All${pendingIngestCount ? ` (${pendingIngestCount})` : ""}`}
                 </button>
               )}
             </div>
@@ -207,51 +223,93 @@ export function SourceManager({
                             {source.status}
                           </span>
                           {source.error_message && (
-                            <span className="text-[10px] text-rose-500 max-w-[150px] truncate" title={source.error_message}>
-                              {source.error_message}
-                            </span>
+                            <div className="group relative cursor-help flex items-center gap-1.5 px-2 py-0.5 mt-1.5 rounded-full bg-rose-50 dark:bg-rose-900/20 w-fit">
+                              <AlertCircle size={12} className="text-rose-500" />
+                              <span className="text-[10px] font-bold text-rose-600 dark:text-rose-400">View Error</span>
+                              <div className="absolute left-0 bottom-full mb-2 w-48 p-2 rounded-lg bg-slate-900 text-white text-[10px] opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+                                {source.error_message}
+                                <div className="absolute left-4 top-full w-2 h-2 bg-slate-900 rotate-45 -mt-1" />
+                              </div>
+                            </div>
                           )}
                         </div>
                       </td>
                       <td className="px-6 py-4 text-right">
-                        <div className="flex justify-end gap-2">
+                        <div className="flex justify-end items-center gap-2">
                           <button
                             onClick={() => onIngestSource(source.id)}
-                            disabled={ingestingSourceId === source.id}
-                            className={`p-2 rounded-lg border transition-all ${
-                              ingestingSourceId === source.id 
-                                ? "bg-slate-100 border-slate-200 text-slate-400" 
-                                : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:border-brand hover:text-brand"
+                            disabled={ingestingAll || ingestingSourceId === source.id}
+                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-bold text-[10px] uppercase tracking-widest transition-all ${
+                              ingestingAll || ingestingSourceId === source.id 
+                                ? "bg-slate-100 text-slate-400" 
+                                : "bg-emerald-600 text-white shadow-sm hover:bg-emerald-700 active:scale-95"
                             }`}
                             title="Ingest Source"
                           >
-                            <Database size={16} className={ingestingSourceId === source.id ? "animate-spin" : ""} />
+                            <Database size={12} className={ingestingAll || ingestingSourceId === source.id ? "animate-spin" : ""} />
+                            Ingest
                           </button>
                           
-                          <button
-                            onClick={async () => {
-                              setActivePreviewSourceId(source.id);
-                              await loadPreviewChunks(source.id);
-                            }}
-                            className={`p-2 rounded-lg border transition-all ${
-                              activePreviewSourceId === source.id
-                                ? "bg-brand/10 border-brand text-brand"
-                                : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:border-brand hover:text-brand"
-                            }`}
-                            title="Preview Chunks"
-                          >
-                            <Eye size={16} />
-                          </button>
-
                           {isPdfSource(source) && (
                             <button
                               onClick={() => openPdfViewerForSource(source.id)}
-                              className="p-2 rounded-lg border border-brand/20 bg-brand/5 text-brand hover:bg-brand hover:text-white transition-all shadow-sm"
+                              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-bold text-[10px] uppercase tracking-widest transition-all bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:border-brand hover:text-brand shadow-sm active:scale-95"
                               title="Open PDF Viewer"
                             >
-                              <FileText size={16} />
+                              <FileText size={12} />
+                              View
                             </button>
                           )}
+
+                          <div className="relative group/dropdown">
+                            <button
+                              className="p-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition-colors shadow-sm"
+                            >
+                              <MoreVertical size={16} />
+                            </button>
+                            <div className="absolute right-0 top-full mt-2 w-48 bg-white dark:bg-slate-900 rounded-xl shadow-xl shadow-slate-200/50 dark:shadow-none border border-slate-200 dark:border-slate-700 opacity-0 invisible group-hover/dropdown:opacity-100 group-hover/dropdown:visible transition-all z-50 flex flex-col p-1.5 origin-top-right">
+                              <button
+                                onClick={async () => {
+                                  setActivePreviewSourceId(source.id);
+                                  await loadPreviewChunks(source.id);
+                                }}
+                                className="w-full text-left flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-bold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+                              >
+                                <Eye size={14} className="text-slate-400" />
+                                Preview Chunks
+                              </button>
+
+                              {canUseSupabase && String(source.file_path).startsWith("local/") && (
+                                <div className="relative w-full text-left flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-bold text-brand hover:bg-brand/5 transition-colors cursor-pointer">
+                                  <input
+                                    type="file" accept=".pdf,application/pdf" className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                                    onChange={(e) => {
+                                      const file = e.target.files?.[0];
+                                      if (file) pushSourceToCloud(source, file);
+                                      e.currentTarget.value = "";
+                                    }}
+                                    disabled={uploadingToCloud[source.id]}
+                                  />
+                                  {uploadingToCloud[source.id] ? (
+                                    <div className="w-3 h-3 border-2 border-brand/20 border-t-brand rounded-full animate-spin" />
+                                  ) : (
+                                    <Cloud size={14} />
+                                  )}
+                                  {uploadingToCloud[source.id] ? "Syncing..." : "Sync to Cloud"}
+                                </div>
+                              )}
+
+                              <div className="h-px w-full bg-slate-100 dark:bg-slate-800 my-1" />
+
+                              <button
+                                onClick={() => onDeleteSource(source.id)}
+                                className="w-full text-left flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-bold text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-900/20 transition-colors"
+                              >
+                                <Trash2 size={14} />
+                                Delete Source
+                              </button>
+                            </div>
+                          </div>
                         </div>
                       </td>
                     </tr>

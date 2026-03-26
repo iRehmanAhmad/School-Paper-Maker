@@ -13,7 +13,7 @@ interface CandidateReviewProps {
   onDeleteCandidates: (ids: string[]) => Promise<void>;
   onReviewCandidate: (id: string, action: "approve" | "reject") => Promise<void>;
   expandedCandidateId: string;
-  setExpandedCandidateId: (id: string | ((prev: string|null) => string|null)) => void;
+  setExpandedCandidateId: (id: string | ((prev: string) => string)) => void;
   deletingCandidates: boolean;
   publishing: boolean;
   candidatePayload: (c: GenerationCandidate) => any;

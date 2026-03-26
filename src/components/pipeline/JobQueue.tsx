@@ -1,4 +1,5 @@
-import { ClipboardList, Play, Info, Eye } from "lucide-react";
+import { Dispatch, SetStateAction, useState } from "react";
+import { ClipboardList, Play, Info, Eye, Loader2, Settings2, ChevronDown } from "lucide-react";
 import type { ArtifactType, QuestionType, Difficulty, BloomLevel, ContentSource } from "@/types/domain";
 
 const questionTypes: QuestionType[] = ["mcq", "true_false", "fill_blanks", "short", "long", "matching", "diagram"];
@@ -32,10 +33,11 @@ interface JobQueueProps {
   artifactLocked: boolean;
   hasIngestedContent: boolean;
   queuedJobsCount: number;
+  completedJobsCount: number;
   readyIngestedSources: ContentSource[];
   chunkCountBySource: Record<string, number>;
   activePreviewSourceId: string;
-  setActivePreviewSourceId: (id: string) => void;
+  setActivePreviewSourceId: Dispatch<SetStateAction<string>>;
   loadPreviewChunks: (id: string) => Promise<void>;
   activeSource: ContentSource | null;
   isPdfSource: (s: any) => boolean;
@@ -72,6 +74,7 @@ export function JobQueue({
   artifactLocked,
   hasIngestedContent,
   queuedJobsCount,
+  completedJobsCount,
   readyIngestedSources,
   chunkCountBySource,
   activePreviewSourceId,
@@ -85,6 +88,7 @@ export function JobQueue({
   lessonPlanLocked,
 }: JobQueueProps) {
   const selectedQueueSource = readyIngestedSources.find((s) => s.id === selectedSourceId) || null;
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   return (
     <div className="rounded-3xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-6 shadow-xl shadow-slate-200/20 dark:shadow-none space-y-6 animate-in slide-in-from-right-4 duration-500">
@@ -170,50 +174,90 @@ export function JobQueue({
           </label>
         </div>
 
-        {artifact === "question" && (
-          <label className="block">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 ml-1">Question Type</span>
-            <select 
-              className="mt-1 w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/50 px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand/20 focus:border-brand transition-all outline-none" 
-              value={questionType} onChange={(e) => setQuestionType(e.target.value as QuestionType)}
-            >
-              {questionTypes.map((row) => <option key={row} value={row}>{row.replace('_', ' ')}</option>)}
-            </select>
-          </label>
-        )}
+        <div className="sm:col-span-2 lg:col-span-3 pt-2">
+          <button 
+            type="button"
+            onClick={() => setShowAdvanced(!showAdvanced)}
+            className={`flex items-center gap-2 text-xs font-bold transition-colors w-fit px-3 py-1.5 rounded-lg border ${
+              showAdvanced ? "bg-brand/5 border-brand/20 text-brand" : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-500 hover:text-brand hover:border-brand/30"
+            }`}
+          >
+            <Settings2 size={14} />
+            {showAdvanced ? "Hide Advanced Settings" : "Advanced AI Settings (Difficulty, Bloom, Instructions)"}
+            <ChevronDown size={14} className={`transition-transform duration-300 ${showAdvanced ? "rotate-180" : ""}`} />
+          </button>
+        </div>
 
-        {(artifact === "question" || artifact === "worksheet") && (
-          <div className="grid grid-cols-2 gap-3">
-            <label className="block">
-              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 ml-1">Difficulty</span>
-              <select 
-                className="mt-1 w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/50 px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand/20 focus:border-brand transition-all outline-none" 
-                value={difficulty} onChange={(e) => setDifficulty(e.target.value as Difficulty)}
-              >
-                {difficulties.map((row) => <option key={row} value={row}>{row}</option>)}
-              </select>
-            </label>
-            <label className="block">
-              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 ml-1">Bloom</span>
-              <select 
-                className="mt-1 w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/50 px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand/20 focus:border-brand transition-all outline-none" 
-                value={bloom} onChange={(e) => setBloom(e.target.value as BloomLevel)}
-              >
-                {blooms.map((row) => <option key={row} value={row}>{row}</option>)}
-              </select>
+        {showAdvanced && (
+          <div className="sm:col-span-2 border-l-2 border-brand/20 pl-4 space-y-4 animate-in slide-in-from-top-2 lg:col-span-3 lg:grid lg:grid-cols-3 lg:gap-4 lg:space-y-0">
+            {artifact === "question" && (
+              <label className="block">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 ml-1">Question Type</span>
+                <select 
+                  className="mt-1 w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/50 px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand/20 focus:border-brand transition-all outline-none" 
+                  value={questionType} onChange={(e) => setQuestionType(e.target.value as QuestionType)}
+                >
+                  {questionTypes.map((row) => <option key={row} value={row}>{row.replace('_', ' ')}</option>)}
+                </select>
+              </label>
+            )}
+
+            {(artifact === "question" || artifact === "worksheet") && (
+              <div className="grid grid-cols-2 gap-3 lg:col-span-2">
+                <label className="block">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 ml-1">Difficulty</span>
+                  <select 
+                    className="mt-1 w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/50 px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand/20 focus:border-brand transition-all outline-none" 
+                    value={difficulty} onChange={(e) => setDifficulty(e.target.value as Difficulty)}
+                  >
+                    {difficulties.map((row) => <option key={row} value={row}>{row}</option>)}
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 ml-1">Bloom</span>
+                  <select 
+                    className="mt-1 w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/50 px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand/20 focus:border-brand transition-all outline-none" 
+                    value={bloom} onChange={(e) => setBloom(e.target.value as BloomLevel)}
+                  >
+                    {blooms.map((row) => <option key={row} value={row}>{row}</option>)}
+                  </select>
+                </label>
+              </div>
+            )}
+
+            <label className="block sm:col-span-2 lg:col-span-3">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 ml-1">AI Instructions (Optional)</span>
+              <textarea 
+                className="mt-1 w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/50 px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand/20 focus:border-brand transition-all outline-none min-h-[80px]" 
+                value={instructions} onChange={(e) => setInstructions(e.target.value)}
+                placeholder="e.g. Focus on definitions, keep questions short..."
+              />
             </label>
           </div>
         )}
       </div>
 
-      <label className="block">
-        <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 ml-1">AI Instructions (Optional)</span>
-        <textarea 
-          className="mt-1 w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/50 px-4 py-2.5 text-sm focus:ring-2 focus:ring-brand/20 focus:border-brand transition-all outline-none min-h-[80px]" 
-          value={instructions} onChange={(e) => setInstructions(e.target.value)}
-          placeholder="e.g. Focus on definitions, keep questions short..."
-        />
-      </label>
+      {runningJobs && (
+        <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 text-white shadow-xl relative overflow-hidden flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 animate-in slide-in-from-bottom-4">
+          <div 
+            className="absolute inset-y-0 left-0 bg-brand/10 transition-all duration-500 ease-out" 
+            style={{ width: `${Math.min(100, (completedJobsCount / Math.max(1, queuedJobsCount + completedJobsCount)) * 100)}%` }}
+          />
+          <div className="flex items-center gap-3 relative z-10 border-l-[3px] border-brand pl-3">
+            <div className="w-8 h-8 rounded-full bg-brand/20 flex items-center justify-center shrink-0">
+              <Loader2 size={16} className="text-brand animate-spin" />
+            </div>
+            <div>
+              <h4 className="text-sm font-bold">Processing AI Jobs</h4>
+              <p className="text-xs text-slate-400 font-medium">Extracting content from context pages {contextStartPage} - {contextEndPage}</p>
+            </div>
+          </div>
+          <div className="flex flex-col items-end shrink-0 relative z-10">
+             <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-0.5">Progress</span>
+             <span className="text-2xl font-display font-black leading-none">{completedJobsCount} <span className="text-sm font-medium text-slate-500">/ {queuedJobsCount + completedJobsCount}</span></span>
+          </div>
+        </div>
+      )}
 
       {/* Action Footer */}
       <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-4 border-t border-slate-100 dark:border-slate-800">
@@ -250,10 +294,24 @@ export function JobQueue({
           <button 
             onClick={onRunJobs} 
             disabled={pipelineBlocked || runningJobs || !chapterId || !hasIngestedContent || queuedJobsCount <= 0} 
-            className="flex-1 sm:flex-none rounded-xl bg-emerald-600 text-white px-6 py-2.5 font-bold text-sm shadow-lg shadow-emerald-200 dark:shadow-none hover:bg-emerald-700 hover:translate-y-[-1px] active:translate-y-[1px] transition-all disabled:opacity-50 disabled:translate-y-0 flex items-center justify-center gap-2"
+            className="group relative flex-1 sm:flex-none rounded-xl bg-emerald-600 text-white px-6 py-2.5 font-bold text-sm shadow-lg shadow-emerald-200 dark:shadow-none hover:bg-emerald-700 hover:translate-y-[-1px] active:translate-y-[1px] transition-all disabled:opacity-50 disabled:translate-y-0 flex items-center justify-center gap-2 min-w-[140px] overflow-hidden"
           >
-            <Play size={14} fill="currentColor" />
-            {runningJobs ? "Running..." : `Process Queue`}
+            {/* Progress Fill */}
+            {runningJobs && (
+              <div 
+                className="absolute inset-0 bg-white/20 transition-all duration-500 ease-out" 
+                style={{ width: `${Math.min(100, (completedJobsCount / Math.max(1, queuedJobsCount + completedJobsCount)) * 100)}%` }}
+              />
+            )}
+            
+            <span className="relative z-10 flex items-center gap-2">
+              {runningJobs ? (
+                <Loader2 size={16} className="animate-spin" />
+              ) : (
+                <Play size={14} fill="currentColor" />
+              )}
+              {runningJobs ? `Running (${completedJobsCount}/${queuedJobsCount + completedJobsCount})` : `Process Queue`}
+            </span>
           </button>
         </div>
       </div>

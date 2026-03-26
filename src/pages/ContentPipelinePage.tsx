@@ -5,25 +5,32 @@ import { useHierarchyScopeParams } from "@/hooks/useHierarchyScopeParams";
 import {
   addContentSource,
   getContentChunksBySource,
+  getContentChunkCountsBySources,
   getContentSources,
   getGenerationCandidates,
   getGenerationJobs,
   getSubscriptionSummary,
   getTopics,
+  getClasses,
+  getSubjects,
+  getChapters,
   queueGenerationJob,
   assertCanGenerateArtifact,
   deleteGenerationCandidates,
   reviewGenerationCandidate,
+  updateContentSourceFilePath,
+  deleteContentSource,
 } from "@/services/repositories";
-import { extractPdfText } from "@/services/pdfText";
+import { extractPdfText, sha256Hex } from "@/services/pdfText";
 import { cacheSourceText } from "@/services/sourceTextCache";
 import { canUseSupabase, supabase } from "@/services/supabase";
 import { invokeIngestSource, invokePublishCandidates, invokeRunGenerationJobs } from "@/services/pipelineRuntime";
-import type { ArtifactType, BloomLevel, ContentChunk, Difficulty, GenerationCandidate, GenerationJob, QuestionType, TopicEntity } from "@/types/domain";
+import type { ArtifactType, BloomLevel, ContentChunk, ContentSource, Difficulty, GenerationCandidate, GenerationJob, QuestionType, TopicEntity } from "@/types/domain";
 import { SourceManager } from "@/components/pipeline/SourceManager";
 import { JobQueue } from "@/components/pipeline/JobQueue";
 import { CandidateReview } from "@/components/pipeline/CandidateReview";
-import { Layers, Zap, CheckSquare, Sparkles, ChevronRight, ChevronLeft, Trash2, AlertCircle } from "lucide-react";
+import { ResourceLibrary } from "@/components/pipeline/ResourceLibrary";
+import { Layers, Zap, CheckSquare, Sparkles, ChevronRight, ChevronLeft, Trash2, AlertCircle, Library } from "lucide-react";
 import { PdfCanvasViewer } from "@/components/pipeline/PdfCanvasViewer";
 
 const questionTypes: QuestionType[] = ["mcq", "true_false", "fill_blanks", "short", "long", "matching", "diagram"];
@@ -34,13 +41,7 @@ function sanitizeName(name: string) {
   return name.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
-async function sha256Hex(file: File) {
-  const bytes = await file.arrayBuffer();
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest))
-    .map((n) => n.toString(16).padStart(2, "0"))
-    .join("");
-}
+// sha256Hex imported from @/services/pdfText
 
 export function ContentPipelinePage() {
   const profile = useAppStore((s) => s.profile);
@@ -78,6 +79,7 @@ export function ContentPipelinePage() {
   const [uploadingSource, setUploadingSource] = useState(false);
   const [runningJobs, setRunningJobs] = useState(false);
   const [ingestingSourceId, setIngestingSourceId] = useState("");
+  const [ingestingAll, setIngestingAll] = useState(false);
 
   const [artifact, setArtifact] = useState<ArtifactType>("question");
   const [selectedSourceId, setSelectedSourceId] = useState("");
@@ -106,12 +108,54 @@ export function ContentPipelinePage() {
   const localPdfPreviewUrlsRef = useRef<Record<string, string>>({});
   const pdfIframeRef = useRef<HTMLIFrameElement | null>(null);
   const [subscriptionSummary, setSubscriptionSummary] = useState<Awaited<ReturnType<typeof getSubscriptionSummary>> | null>(null);
+  const [uploadingToCloud, setUploadingToCloud] = useState<Record<string, boolean>>({});
+  const [allSchoolSources, setAllSchoolSources] = useState<ContentSource[]>([]);
+  const [allSchoolClasses, setAllSchoolClasses] = useState<any[]>([]);
+  const [allSchoolSubjects, setAllSchoolSubjects] = useState<any[]>([]);
+  const [allSchoolChapters, setAllSchoolChapters] = useState<any[]>([]);
+  const [loadingLibrary, setLoadingLibrary] = useState(false);
 
   const activeSource = sources.find((source) => source.id === activePreviewSourceId) || null;
   const selectedQueueSource = sources.find((source) => source.id === selectedSourceId) || null;
   const activeSourcePageCount = Math.max(0, Number(activeSource?.pages || 0));
   // Do not hard-cap navigation by ingest-detected page count (it can be incomplete/inaccurate).
   const pdfPageCap = 5000;
+  const sourceSelectionStorageKey = useMemo(() => {
+    if (!profile?.school_id || !chapterId) return "";
+    return `pg_pipeline_source_selection:${profile.school_id}:${chapterId}:${topicId || "all"}`;
+  }, [profile?.school_id, chapterId, topicId]);
+
+  function readPersistedSourceSelection() {
+    if (!sourceSelectionStorageKey || typeof window === "undefined") {
+      return { activePreviewSourceId: "", selectedSourceId: "" };
+    }
+    try {
+      const raw = localStorage.getItem(sourceSelectionStorageKey);
+      if (!raw) return { activePreviewSourceId: "", selectedSourceId: "" };
+      const parsed = JSON.parse(raw) as { activePreviewSourceId?: string; selectedSourceId?: string };
+      return {
+        activePreviewSourceId: String(parsed.activePreviewSourceId || "").trim(),
+        selectedSourceId: String(parsed.selectedSourceId || "").trim(),
+      };
+    } catch {
+      return { activePreviewSourceId: "", selectedSourceId: "" };
+    }
+  }
+
+  useEffect(() => {
+    if (!sourceSelectionStorageKey || typeof window === "undefined") return;
+    try {
+      localStorage.setItem(
+        sourceSelectionStorageKey,
+        JSON.stringify({
+          activePreviewSourceId: activePreviewSourceId || "",
+          selectedSourceId: selectedSourceId || "",
+        }),
+      );
+    } catch {
+      // ignore localStorage errors
+    }
+  }, [sourceSelectionStorageKey, activePreviewSourceId, selectedSourceId]);
 
   useEffect(() => {
     localPdfPreviewUrlsRef.current = localPdfPreviewUrls;
@@ -309,6 +353,10 @@ export function ContentPipelinePage() {
   );
   const queuedJobsCount = useMemo(
     () => jobs.filter((job) => job.status === "queued").length,
+    [jobs],
+  );
+  const completedJobsCount = useMemo(
+    () => jobs.filter((job) => job.status === "completed" || job.status === "failed").length,
     [jobs],
   );
   const hasUploadedSources = sources.length > 0;
@@ -535,7 +583,7 @@ export function ContentPipelinePage() {
     }
     setLoadingData(true);
     try {
-      const [sourceRows, jobRows, candidateRows] = await Promise.all([
+      const [sourceRows, jobRows] = await Promise.all([
         getContentSources(profile.school_id, {
           chapter_id: chapterId,
           topic_id: topicId || undefined,
@@ -544,21 +592,34 @@ export function ContentPipelinePage() {
           chapter_id: chapterId,
           topic_id: topicId || undefined,
         }),
-        getGenerationCandidates(profile.school_id, {}),
       ]);
+      const scopedJobIds = jobRows.map((job) => job.id);
+      const [candidateRows, countMap] = await Promise.all([
+        scopedJobIds.length
+          ? getGenerationCandidates(profile.school_id, { job_ids: scopedJobIds })
+          : Promise.resolve([] as GenerationCandidate[]),
+        sourceRows.length
+          ? getContentChunkCountsBySources(sourceRows.map((source) => source.id))
+          : Promise.resolve({} as Record<string, number>),
+      ]);
+      const persistedSelection = readPersistedSourceSelection();
       setSources(sourceRows);
-
-      const counts = await Promise.all(
-        sourceRows.map(async (source) => {
-          const chunks = await getContentChunksBySource(source.id);
-          return [source.id, chunks.length] as const;
-        }),
-      );
-      const countMap = Object.fromEntries(counts);
       setChunkCountBySource(countMap);
+
+      const validSelectedId =
+        (selectedSourceId && sourceRows.some((source) => source.id === selectedSourceId) && selectedSourceId) ||
+        (persistedSelection.selectedSourceId &&
+          sourceRows.some((source) => source.id === persistedSelection.selectedSourceId) &&
+          persistedSelection.selectedSourceId) ||
+        "";
+      setSelectedSourceId(validSelectedId);
 
       const previewSourceId =
         (activePreviewSourceId && sourceRows.some((source) => source.id === activePreviewSourceId) && activePreviewSourceId)
+        || (persistedSelection.activePreviewSourceId &&
+          sourceRows.some((source) => source.id === persistedSelection.activePreviewSourceId) &&
+          persistedSelection.activePreviewSourceId)
+        || validSelectedId
         || sourceRows.find((source) => (countMap[source.id] || 0) > 0)?.id
         || sourceRows[0]?.id
         || "";
@@ -580,9 +641,120 @@ export function ContentPipelinePage() {
     }
   }
 
+  async function refreshSourcesOnly() {
+    if (!profile?.school_id || !chapterId) return;
+    try {
+      const sourceRows = await getContentSources(profile.school_id, {
+        chapter_id: chapterId,
+        topic_id: topicId || undefined,
+      });
+      const countMap = sourceRows.length
+        ? await getContentChunkCountsBySources(sourceRows.map((source) => source.id))
+        : {};
+      setSources(sourceRows);
+      setChunkCountBySource(countMap);
+      setSelectedSourceId((prev) => (sourceRows.some((source) => source.id === prev) ? prev : ""));
+      setActivePreviewSourceId((prev) => {
+        if (sourceRows.some((source) => source.id === prev)) return prev;
+        return sourceRows.find((source) => (countMap[source.id] || 0) > 0)?.id || sourceRows[0]?.id || "";
+      });
+    } catch (error) {
+      console.error("Failed to refresh sources:", error);
+    }
+  }
+
+  async function loadLibrary() {
+    if (!profile?.school_id) return;
+    setLoadingLibrary(true);
+    try {
+      const [allSources, allClasses] = await Promise.all([
+        getContentSources(profile.school_id, {}),
+        getClasses(profile.school_id),
+      ]);
+      setAllSchoolSources(allSources);
+      setAllSchoolClasses(allClasses);
+
+      const classIds = allClasses.map((c: any) => c.id);
+      let allSubjects: any[] = [];
+      if (classIds.length > 0) {
+        allSubjects = await getSubjects(classIds);
+      }
+      setAllSchoolSubjects(allSubjects);
+
+      const subjectIds = allSubjects.map((s: any) => s.id);
+      let allChapters: any[] = [];
+      if (subjectIds.length > 0) {
+        allChapters = await getChapters(subjectIds);
+      }
+      setAllSchoolChapters(allChapters);
+    } catch (error) {
+      console.error("Failed to load school library:", error);
+    } finally {
+      setLoadingLibrary(false);
+    }
+  }
+
   useEffect(() => {
     loadData();
   }, [profile?.school_id, chapterId, topicId]);
+
+  useEffect(() => {
+    if (!profile?.school_id || !chapterId) return;
+    const shouldPoll = ingestingAll || sources.some((source) => source.status === "processing");
+    if (!shouldPoll) return;
+    const timer = window.setInterval(() => {
+      void refreshSourcesOnly();
+    }, 4500);
+    return () => window.clearInterval(timer);
+  }, [profile?.school_id, chapterId, topicId, sources, ingestingAll]);
+
+  useEffect(() => {
+    loadLibrary();
+  }, [profile?.school_id, sources.length]); // Re-load when sources list changes
+
+  async function onUseSource(source: ContentSource) {
+    if (!source.exam_body_id || !source.class_id || !source.subject_id || !source.chapter_id) {
+      toast("error", "Source is missing required hierarchy info");
+      return;
+    }
+    // Update the global context filters
+    setExamBodyId(source.exam_body_id);
+    setClassId(source.class_id);
+    setSubjectId(source.subject_id);
+    setChapterId(source.chapter_id);
+    if (source.topic_id) setTopicId(source.topic_id);
+    
+    // Select the source for generation
+    setSelectedSourceId(source.id);
+    setActivePreviewSourceId(source.id);
+    await loadPreviewChunks(source.id);
+    
+    // Switch to Generation tab (Step 3 now)
+    setActiveStep(3);
+    toast("success", `Pre-selected source: ${source.title}`);
+  }
+
+  async function pushSourceToCloud(source: ContentSource, file: File) {
+    if (!supabase || !profile) return;
+    setUploadingToCloud(prev => ({ ...prev, [source.id]: true }));
+    try {
+      const bucket = "content-sources";
+      const path = `${source.school_id}/${source.exam_body_id}/${source.class_id}/${source.subject_id}/${source.chapter_id}/${Date.now()}-${sanitizeName(file.name)}`;
+      
+      const { error: uploadError } = await supabase.storage.from(bucket).upload(path, file);
+      if (uploadError) throw uploadError;
+
+      const filePath = `${bucket}/${path}`;
+      const updated = await updateContentSourceFilePath(source.id, filePath);
+      
+      setSources(prev => prev.map(s => s.id === source.id ? updated : s));
+      toast("success", "Source synced to cloud successfully!");
+    } catch (error) {
+      toast("error", error instanceof Error ? error.message : "Cloud sync failed");
+    } finally {
+      setUploadingToCloud(prev => ({ ...prev, [source.id]: false }));
+    }
+  }
 
   async function onUploadSource(event: FormEvent) {
     event.preventDefault();
@@ -617,7 +789,7 @@ export function ContentPipelinePage() {
       // For local or cloud, we always cache the text if we can before upload
       // This ensures immediate ingestion is possible without re-downloading
       try {
-        const extracted = await extractLocalSourceText(sourceFile);
+        const extracted = await extractPdfText(sourceFile, 250000, { includePageMarkers: true });
         if (extracted && extracted.trim().length > 80) {
           cacheSourceText(fileHash, extracted);
         }
@@ -690,17 +862,100 @@ export function ContentPipelinePage() {
     }
   }
 
-  async function onIngestSource(sourceId: string) {
-    setIngestingSourceId(sourceId);
+  async function onDeleteSource(sourceId: string) {
+    if (!confirm("Are you sure you want to permanently delete this source and all its data?")) return;
     try {
-      const result = await invokeIngestSource(sourceId);
-      toast("success", `Ingestion complete (${result.chunk_count} chunks)`);
+      await deleteContentSource(sourceId);
+      toast("success", "Source deleted successfully");
+      if (activePreviewSourceId === sourceId) {
+        setActivePreviewSourceId("");
+        setPreviewChunks([]);
+      }
+      if (selectedSourceId === sourceId) setSelectedSourceId("");
       await loadData();
     } catch (error) {
-      toast("error", error instanceof Error ? error.message : "Ingestion failed");
+      toast("error", error instanceof Error ? error.message : "Failed to delete source");
+    }
+  }
+
+  async function ingestSourceById(sourceId: string, options?: { silent?: boolean }) {
+    setIngestingSourceId(sourceId);
+    setSources((prev) =>
+      prev.map((source) =>
+        source.id === sourceId ? { ...source, status: "processing", error_message: null } : source,
+      ),
+    );
+    try {
+      const result = await invokeIngestSource(sourceId);
+      setSources((prev) =>
+        prev.map((source) =>
+          source.id === sourceId
+            ? {
+              ...source,
+              status: "ready",
+              error_message: null,
+            }
+            : source,
+        ),
+      );
+      setChunkCountBySource((prev) => ({ ...prev, [sourceId]: result.chunk_count }));
+      if (activePreviewSourceId === sourceId) {
+        await loadPreviewChunks(sourceId);
+      }
+      if (!options?.silent) {
+        toast("success", `Ingestion complete (${result.chunk_count} chunks)`);
+      }
+      return { ok: true as const };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Ingestion failed";
+      setSources((prev) =>
+        prev.map((source) =>
+          source.id === sourceId
+            ? {
+              ...source,
+              status: "failed",
+              error_message: message,
+            }
+            : source,
+        ),
+      );
+      if (!options?.silent) {
+        toast("error", message);
+      }
+      return { ok: false as const, error: message };
     } finally {
       setIngestingSourceId("");
     }
+  }
+
+  async function onIngestSource(sourceId: string) {
+    await ingestSourceById(sourceId);
+  }
+
+  async function onIngestAll() {
+    const pending = sources.filter((source) => source.status !== "ready");
+    if (!pending.length) {
+      toast("success", "All sources are already ingested.");
+      return;
+    }
+    setIngestingAll(true);
+    let completed = 0;
+    let failed = 0;
+    for (const source of pending) {
+      const result = await ingestSourceById(source.id, { silent: true });
+      if (result.ok) {
+        completed += 1;
+      } else {
+        failed += 1;
+      }
+    }
+    setIngestingAll(false);
+    if (failed > 0) {
+      toast("error", `Ingest all finished. Completed: ${completed}, Failed: ${failed}.`);
+    } else {
+      toast("success", `Ingest all finished. Completed: ${completed}.`);
+    }
+    await refreshSourcesOnly();
   }
 
   async function onQueueJob() {
@@ -761,7 +1016,7 @@ export function ContentPipelinePage() {
               instructions: instructions.trim(),
             };
 
-      await queueGenerationJob({
+      const queuedJob = await queueGenerationJob({
         school_id: profile.school_id,
         exam_body_id: examBodyId,
         class_id: classId,
@@ -772,8 +1027,8 @@ export function ContentPipelinePage() {
         request_json: requestJson,
         created_by: profile.id,
       });
+      setJobs((prev) => [queuedJob, ...prev.filter((job) => job.id !== queuedJob.id)]);
       toast("success", "Generation job queued");
-      await loadData();
     } catch (error) {
       toast("error", error instanceof Error ? error.message : "Failed to queue job");
     } finally {
@@ -830,9 +1085,11 @@ export function ContentPipelinePage() {
   async function onReviewCandidate(candidateId: string, action: "approve" | "reject") {
     if (!profile) return;
     try {
-      await reviewGenerationCandidate(candidateId, action, profile.id);
+      const updated = await reviewGenerationCandidate(candidateId, action, profile.id);
+      setCandidates((prev) =>
+        prev.map((candidate) => (candidate.id === updated.id ? updated : candidate)),
+      );
       toast("success", action === "approve" ? "Candidate approved" : "Candidate rejected");
-      await loadData();
     } catch (error) {
       toast("error", error instanceof Error ? error.message : "Review failed");
     }
@@ -850,9 +1107,20 @@ export function ContentPipelinePage() {
     setPublishing(true);
     try {
       const result = await invokePublishCandidates(ids);
+      const publishedIds = new Set(
+        result.details
+          .filter((detail) => detail.status === "published")
+          .map((detail) => detail.candidate_id),
+      );
+      if (publishedIds.size > 0) {
+        setCandidates((prev) =>
+          prev.map((candidate) =>
+            publishedIds.has(candidate.id) ? { ...candidate, status: "published" } : candidate,
+          ),
+        );
+      }
       toast("success", `Published ${result.published} candidate(s)`);
-      setSelectedCandidateIds([]);
-      await loadData();
+      setSelectedCandidateIds((prev) => prev.filter((id) => !publishedIds.has(id)));
     } catch (error) {
       toast("error", error instanceof Error ? error.message : "Failed to publish candidates");
     } finally {
@@ -882,8 +1150,8 @@ export function ContentPipelinePage() {
         setExpandedCandidateId("");
       }
       toast("success", `Deleted ${deleted} candidate(s)`);
+      setCandidates((prev) => prev.filter((candidate) => !uniqueIds.includes(candidate.id)));
       setSelectedCandidateIds((prev) => prev.filter((id) => !uniqueIds.includes(id)));
-      await loadData();
     } catch (error) {
       toast("error", error instanceof Error ? error.message : "Failed to delete candidates");
     } finally {
@@ -982,9 +1250,10 @@ export function ContentPipelinePage() {
       <div className="flex items-center justify-center py-4">
         <div className="flex items-center gap-2 p-1.5 bg-slate-100 dark:bg-slate-800/50 rounded-2xl border border-slate-200 dark:border-slate-700">
            {[
-             { id: 1, label: 'Sources', icon: Layers },
-             { id: 2, label: 'Generation', icon: Zap },
-             { id: 3, label: 'Review', icon: CheckSquare }
+             { id: 1, label: 'Library', icon: Library },
+             { id: 2, label: 'Sources', icon: Layers },
+             { id: 3, label: 'Generation', icon: Zap },
+             { id: 4, label: 'Review', icon: CheckSquare }
            ].map((step, idx) => (
              <Fragment key={step.id}>
                <button
@@ -999,7 +1268,7 @@ export function ContentPipelinePage() {
                  <step.icon size={14} className={activeStep === step.id ? "text-brand" : ""} />
                  {step.label}
                </button>
-               {idx < 2 && <div className="w-[1px] h-4 bg-slate-200 dark:bg-slate-700 mx-1" />}
+               {idx < 3 && <div className="w-[1px] h-4 bg-slate-200 dark:bg-slate-700 mx-1" />}
              </Fragment>
            ))}
         </div>
@@ -1008,6 +1277,19 @@ export function ContentPipelinePage() {
       {/* Step Content */}
       <div className="min-h-[400px]">
         {activeStep === 1 && (
+          <ResourceLibrary 
+            examBodies={examBodies}
+            classes={allSchoolClasses}
+            subjects={allSchoolSubjects}
+            chapters={allSchoolChapters}
+            sources={allSchoolSources}
+            onUseSource={onUseSource}
+            onDeleteSource={onDeleteSource}
+            loading={loadingLibrary}
+          />
+        )}
+
+        {activeStep === 2 && (
           <SourceManager 
             sources={sources}
             chunkCountBySource={chunkCountBySource}
@@ -1030,6 +1312,12 @@ export function ContentPipelinePage() {
             totalChunkCount={totalChunkCount}
             ingestedSourceCount={ingestedSourceCount}
             isPdfSource={isPdfSource}
+            canUseSupabase={canUseSupabase()}
+            pushSourceToCloud={pushSourceToCloud}
+            uploadingToCloud={uploadingToCloud}
+            onDeleteSource={onDeleteSource}
+            onIngestAll={onIngestAll}
+            ingestingAll={ingestingAll}
           />
         )}
 
@@ -1067,6 +1355,7 @@ export function ContentPipelinePage() {
             artifactLocked={artifactLocked}
             hasIngestedContent={hasIngestedContent}
             queuedJobsCount={queuedJobsCount}
+            completedJobsCount={completedJobsCount}
             readyIngestedSources={readyIngestedSources}
             chunkCountBySource={chunkCountBySource}
             activePreviewSourceId={activePreviewSourceId}
@@ -1220,19 +1509,34 @@ export function ContentPipelinePage() {
                              : "We couldn't load the cloud preview. You can attach the local file manually to continue."}
                          </p>
                        </div>
-                       {isLocalSource(activeSource) && (
-                         <label className="px-6 py-2.5 rounded-xl bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-bold cursor-pointer hover:scale-[1.02] transition-all">
-                           Select File Manually
-                           <input
-                             type="file" accept=".pdf,application/pdf" className="hidden"
-                             onChange={(e) => {
-                               const file = e.target.files?.[0] || null;
-                               if (activePreviewSourceId) attachLocalPreviewFile(activePreviewSourceId, file);
-                               e.currentTarget.value = "";
-                             }}
-                           />
-                         </label>
-                       )}
+                        {isLocalSource(activeSource) && (
+                          <div className="flex flex-col items-center gap-3">
+                            <label className="px-6 py-2.5 rounded-xl bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-bold cursor-pointer hover:scale-[1.02] transition-all">
+                              Select File Manually
+                              <input
+                                type="file" accept=".pdf,application/pdf" className="hidden"
+                                onChange={(e) => {
+                                  const file = e.target.files?.[0] || null;
+                                  if (activePreviewSourceId) attachLocalPreviewFile(activePreviewSourceId, file);
+                                  e.currentTarget.value = "";
+                                }}
+                              />
+                            </label>
+                            
+                            {canUseSupabase() && pdfPreviewUrl && (
+                              <button
+                                onClick={() => {
+                                  // This is a bit tricky since we don't have the File object here
+                                  // But we can tell the user to use the SourceManager's new sync button
+                                  toast("success", "File re-attached. Use the 'Cloud Sync' button in the Sources tab to make it permanent.");
+                                }}
+                                className="text-[10px] font-bold text-brand hover:underline"
+                              >
+                                Want to make this permanent? Sync to cloud.
+                              </button>
+                            )}
+                          </div>
+                        )}
                     </div>
                   )}
 

@@ -157,7 +157,9 @@ export async function invokeIngestSource(sourceId: string): Promise<IngestSource
   try {
     let cleanText = "";
     const filePath = String(source.file_path || "").trim();
-    const isPdf = filePath.toLowerCase().endsWith(".pdf") || String(source.title || "").toLowerCase().endsWith(".pdf");
+    const isPdf = filePath.toLowerCase().endsWith(".pdf") || 
+                  String(source.title || "").toLowerCase().endsWith(".pdf") ||
+                  String(source.id).includes("pdf");
 
     // 1. Try Cache First
     const cachedText = readCachedSourceText(source.file_hash);

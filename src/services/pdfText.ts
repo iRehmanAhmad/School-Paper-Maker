@@ -35,7 +35,8 @@ async function loadTesseract() {
   return mod;
 }
 
-async function sha256Hex(buffer: ArrayBuffer) {
+export async function sha256Hex(input: ArrayBuffer | File) {
+  const buffer = input instanceof File ? await input.arrayBuffer() : input;
   const digest = await crypto.subtle.digest("SHA-256", buffer);
   return Array.from(new Uint8Array(digest))
     .map((n) => n.toString(16).padStart(2, "0"))
