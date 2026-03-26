@@ -136,6 +136,9 @@ export function ChaptersPage() {
   const [reordering, setReordering] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; message: string; countSnapshot: number } | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [selectedChapterIds, setSelectedChapterIds] = useState<string[]>([]);
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
   const [topics, setTopics] = useState<TopicEntity[]>([]);
   const [topicCountById, setTopicCountById] = useState<Record<string, number>>({});
   const [selectedChapterForTopics, setSelectedChapterForTopics] = useState("");
@@ -161,6 +164,10 @@ export function ChaptersPage() {
     setOrderedRows(next);
     setNumber(next.length ? Math.max(...next.map((x) => x.chapter_number)) + 1 : 1);
   }, [allChapters]);
+
+  useEffect(() => {
+    setSelectedChapterIds((prev) => prev.filter((id) => orderedRows.some((row) => row.id === id)));
+  }, [orderedRows]);
 
   useEffect(() => {
     if (!profile?.school_id || !orderedRows.length) {
@@ -265,12 +272,13 @@ export function ChaptersPage() {
     [orderedRows, searchValue]
   );
   const topicSearchValue = topicSearch.trim().toLowerCase();
+  const allFilteredSelected = filteredRows.length > 0 && filteredRows.every((row) => selectedChapterIds.includes(row.id));
   const selectedBodyName = examBodies.find((item) => item.id === examBodyId)?.name;
   const selectedClassName = classes.find((item) => item.id === classId)?.name;
   const selectedSubjectName = subjects.find((item) => item.id === subjectId)?.name;
   const selectedScopeChapterName = orderedRows.find((item) => item.id === scope.chapterId)?.title;
 
-  function parseTopicNames(raw: string) {
+  function parseCommaNames(raw: string) {
     const names = raw
       .split(/[\n,]/g)
       .map((item) => item.trim())
@@ -284,13 +292,16 @@ export function ChaptersPage() {
     });
   }
 
+  function parseTopicNames(raw: string) {
+    return parseCommaNames(raw);
+  }
+
   function onChapterTitleKeyDown(e: KeyboardEvent<HTMLInputElement>) {
     if (e.key !== "Tab") return;
-    const suggestion = findSuggestion(title, chapterSuggestions);
-    if (!suggestion) return;
-    if (suggestion.toLowerCase() === title.trim().toLowerCase()) return;
+    const completed = completeLastCommaToken(title, chapterSuggestions);
+    if (!completed) return;
     e.preventDefault();
-    setTitle(suggestion);
+    setTitle(completed);
   }
 
   function onChapterTopicsInputKeyDown(e: KeyboardEvent<HTMLInputElement>) {
@@ -303,11 +314,10 @@ export function ChaptersPage() {
 
   function onTopicTitleKeyDown(e: KeyboardEvent<HTMLInputElement>) {
     if (e.key !== "Tab") return;
-    const suggestion = findSuggestion(topicTitle, topicSuggestions);
-    if (!suggestion) return;
-    if (suggestion.toLowerCase() === topicTitle.trim().toLowerCase()) return;
+    const completed = completeLastCommaToken(topicTitle, topicSuggestions);
+    if (!completed) return;
     e.preventDefault();
-    setTopicTitle(suggestion);
+    setTopicTitle(completed);
   }
 
   function buildReorderedRows(sourceId: string, targetId: string) {
@@ -401,15 +411,6 @@ export function ChaptersPage() {
       }));
       const inserted = await addChapters(payload);
       setOrderedRows((prev) => [...prev, ...inserted].sort((a, b) => a.chapter_number - b.chapter_number));
-      const defaultTopics = await Promise.all(
-        inserted.map((chapter) =>
-          addTopic({ chapter_id: chapter.id, title: "General", topic_number: 1 }).catch(() => null)
-        )
-      );
-      const validTopics = defaultTopics.filter((topic): topic is TopicEntity => !!topic);
-      if (validTopics.length) {
-        setTopics((prev) => mergeTopics(prev, validTopics));
-      }
       toast("success", `Added ${payload.length} chapters`);
       setShowAiSyllabus(false);
       setAiChapters([]);
@@ -421,29 +422,89 @@ export function ChaptersPage() {
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (!subjectId || !title.trim()) {
+    if (!subjectId) {
+      return;
+    }
+    const chapterTitles = parseCommaNames(title);
+    if (!chapterTitles.length) {
       return;
     }
     try {
-      const inserted = await addChapter({ subject_id: subjectId, title: title.trim(), chapter_number: number });
-      setOrderedRows((prev) => [...prev, inserted].sort((a, b) => a.chapter_number - b.chapter_number));
-      const parsedTopics = parseTopicNames(chapterTopicsInput);
-      const topicNames = parsedTopics.length ? parsedTopics : ["General"];
-      const newTopics = await Promise.all(
-        topicNames.map((topicTitle, idx) =>
-          addTopic({
-            chapter_id: inserted.id,
-            title: topicTitle,
-            topic_number: idx + 1,
-          })
-        )
+      const existingTitles = new Set(
+        orderedRows
+          .filter((row) => row.subject_id === subjectId)
+          .map((row) => row.title.trim().toLowerCase()),
       );
+      const targets = chapterTitles.filter((chapterTitle) => !existingTitles.has(chapterTitle.toLowerCase()));
+      if (!targets.length) {
+        toast("error", "All chapter titles already exist");
+        return;
+      }
+
+      let nextChapterNumber = number;
+      const insertedChapters: ChapterEntity[] = [];
+      let skippedChapters = 0;
+      for (const chapterTitle of targets) {
+        try {
+          const inserted = await addChapter({
+            subject_id: subjectId,
+            title: chapterTitle,
+            chapter_number: nextChapterNumber,
+          });
+          insertedChapters.push(inserted);
+          nextChapterNumber += 1;
+        } catch (error) {
+          const message = error instanceof Error ? error.message.toLowerCase() : "";
+          if (message.includes("already exists") || message.includes("duplicate")) {
+            skippedChapters += 1;
+            nextChapterNumber += 1;
+            continue;
+          }
+          throw error;
+        }
+      }
+
+      if (!insertedChapters.length) {
+        toast("error", "No new chapters were added");
+        return;
+      }
+
+      setOrderedRows((prev) => [...prev, ...insertedChapters].sort((a, b) => a.chapter_number - b.chapter_number));
+      const parsedTopics = parseTopicNames(chapterTopicsInput);
+      const topicNames = parsedTopics;
+      const newTopics: TopicEntity[] = [];
+      if (topicNames.length > 0) {
+        for (const chapter of insertedChapters) {
+          for (let idx = 0; idx < topicNames.length; idx += 1) {
+            const topicTitle = topicNames[idx];
+            try {
+              const topic = await addTopic({
+                chapter_id: chapter.id,
+                title: topicTitle,
+                topic_number: idx + 1,
+              });
+              newTopics.push(topic);
+            } catch (error) {
+              const message = error instanceof Error ? error.message.toLowerCase() : "";
+              if (message.includes("already exists") || message.includes("duplicate")) {
+                continue;
+              }
+              throw error;
+            }
+          }
+        }
+      }
       setTopics((prev) => mergeTopics(prev, newTopics));
-      setSelectedChapterForTopics(inserted.id);
+      setSelectedChapterForTopics(insertedChapters[insertedChapters.length - 1].id);
       setTitle("");
       setChapterTopicsInput("");
-      setNumber((n: number) => n + 1);
-      toast("success", `Chapter added with ${newTopics.length} topic(s)`);
+      setNumber(nextChapterNumber);
+      toast(
+        "success",
+        `${insertedChapters.length} chapter(s) added with ${newTopics.length} topic(s)${
+          skippedChapters ? `, ${skippedChapters} skipped` : ""
+        }`,
+      );
       // Note: useHierarchy handles re-fetching via its internal effects
     } catch (error) {
       toast("error", error instanceof Error ? error.message : "Failed to add chapter");
@@ -490,6 +551,63 @@ export function ChaptersPage() {
     setIsDeleting(false);
   }
 
+  function toggleChapterSelection(id: string) {
+    setSelectedChapterIds((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]));
+  }
+
+  function toggleSelectAllFilteredChapters() {
+    if (!filteredRows.length) return;
+    const visibleIds = filteredRows.map((row) => row.id);
+    const allSelected = visibleIds.every((id) => selectedChapterIds.includes(id));
+    setSelectedChapterIds((prev) => {
+      if (allSelected) {
+        return prev.filter((id) => !visibleIds.includes(id));
+      }
+      const next = new Set(prev);
+      visibleIds.forEach((id) => next.add(id));
+      return Array.from(next);
+    });
+  }
+
+  async function confirmBulkDelete() {
+    if (!selectedChapterIds.length) return;
+    setBulkDeleting(true);
+    const targets = [...selectedChapterIds];
+    let deleted = 0;
+    let failed = 0;
+    for (const id of targets) {
+      try {
+        await deleteChapter(id);
+        deleted += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    if (deleted > 0) {
+      setOrderedRows((prev) => prev.filter((row) => !targets.includes(row.id)));
+      setTopics((prev) => prev.filter((topic) => !targets.includes(topic.chapter_id)));
+      setQuestionCountByChapter((prev) => {
+        const next = { ...prev };
+        targets.forEach((id) => delete next[id]);
+        return next;
+      });
+      if (scope.chapterId && targets.includes(scope.chapterId)) {
+        clearFrom("chapterId");
+      }
+      if (selectedChapterForTopics && targets.includes(selectedChapterForTopics)) {
+        setSelectedChapterForTopics("");
+      }
+    }
+    setSelectedChapterIds([]);
+    setBulkDeleteOpen(false);
+    setBulkDeleting(false);
+    if (deleted > 0) {
+      toast("success", `${deleted} chapter(s) deleted${failed ? `, ${failed} failed` : ""}`);
+    } else {
+      toast("error", "Failed to delete selected chapters");
+    }
+  }
+
   async function saveEdit() {
     if (!editId) return;
     try {
@@ -508,19 +626,44 @@ export function ChaptersPage() {
 
   async function submitTopic(e: FormEvent) {
     e.preventDefault();
-    if (!selectedChapterForTopics || !topicTitle.trim()) {
+    if (!selectedChapterForTopics) {
+      return;
+    }
+    const topicTitles = parseCommaNames(topicTitle);
+    if (!topicTitles.length) {
       return;
     }
     try {
-      const inserted = await addTopic({
-        chapter_id: selectedChapterForTopics,
-        title: topicTitle.trim(),
-        topic_number: topicNumber,
-      });
-      setTopics((prev) => mergeTopics(prev, [inserted]));
+      let nextTopicNumber = topicNumber;
+      let skippedTopics = 0;
+      const insertedTopics: TopicEntity[] = [];
+      for (const topicName of topicTitles) {
+        try {
+          const inserted = await addTopic({
+            chapter_id: selectedChapterForTopics,
+            title: topicName,
+            topic_number: nextTopicNumber,
+          });
+          insertedTopics.push(inserted);
+          nextTopicNumber += 1;
+        } catch (error) {
+          const message = error instanceof Error ? error.message.toLowerCase() : "";
+          if (message.includes("already exists") || message.includes("duplicate")) {
+            skippedTopics += 1;
+            nextTopicNumber += 1;
+            continue;
+          }
+          throw error;
+        }
+      }
+      if (!insertedTopics.length) {
+        toast("error", "No new topics were added");
+        return;
+      }
+      setTopics((prev) => mergeTopics(prev, insertedTopics));
       setTopicTitle("");
-      setTopicNumber((n) => n + 1);
-      toast("success", "Topic added");
+      setTopicNumber(nextTopicNumber);
+      toast("success", `${insertedTopics.length} topic(s) added${skippedTopics ? `, ${skippedTopics} skipped` : ""}`);
     } catch (error) {
       toast("error", error instanceof Error ? error.message : "Failed to add topic");
     }
@@ -674,8 +817,9 @@ export function ChaptersPage() {
             onChange={setTitle}
             suggestion={findSuggestion(title, chapterSuggestions)}
             onKeyDown={onChapterTitleKeyDown}
-            placeholder="Chapter title (type then Tab to autocomplete)"
+            placeholder="e.g. Introduction, Algebra, Geometry (Tab autocomplete per token)"
           />
+          <p className="mt-1 text-[10px] text-slate-500">Comma separated chapter titles are supported.</p>
         </label>
         <label className="text-xs font-semibold text-slate-600">Topics (Optional)
           <input
@@ -686,7 +830,7 @@ export function ChaptersPage() {
             autoComplete="off"
             placeholder="e.g. Basics, Exercise 1, Review (Tab to autocomplete token)"
           />
-          <p className="mt-1 text-[10px] text-slate-500">Comma separated. Leave empty to auto-create "General".</p>
+          <p className="mt-1 text-[10px] text-slate-500">Comma separated. Leave empty to create no topics.</p>
         </label>
         <label className="text-xs font-semibold text-slate-600">Number
           <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" type="number" value={number} onChange={(e) => setNumber(Number(e.target.value))} />
@@ -703,10 +847,28 @@ export function ChaptersPage() {
         </button>
       </form>
 
-      <div className="flex items-center gap-4">
+      <div className="flex flex-wrap items-end justify-between gap-3">
         <label className="flex-1 text-xs font-semibold text-slate-600">Search Chapter
           <input className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Type title or chapter number" />
         </label>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={toggleSelectAllFilteredChapters}
+            disabled={!filteredRows.length}
+            className="rounded border border-slate-200 px-2 py-1 text-[11px] font-semibold text-slate-600 hover:border-brand hover:text-brand disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {allFilteredSelected ? "Unselect All Shown" : "Select All Shown"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setBulkDeleteOpen(true)}
+            disabled={!selectedChapterIds.length}
+            className="rounded bg-red-100 px-2 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-200 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            Delete Selected ({selectedChapterIds.length})
+          </button>
+        </div>
       </div>
 
       <div className="space-y-2">
@@ -724,6 +886,15 @@ export function ChaptersPage() {
             <table className="w-full text-left text-sm">
               <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wider text-slate-500">
                 <tr>
+                  <th className="w-12 px-4 py-3 text-center">
+                    <input
+                      type="checkbox"
+                      checked={allFilteredSelected}
+                      onChange={toggleSelectAllFilteredChapters}
+                      disabled={!filteredRows.length}
+                      className="h-4 w-4"
+                    />
+                  </th>
                   <th className="w-12 px-4 py-3">Move</th>
                   <th className="w-20 px-4 py-3">No.</th>
                   <th className="px-4 py-3">Title</th>
@@ -735,7 +906,7 @@ export function ChaptersPage() {
               <tbody className="divide-y divide-slate-100">
                 {filteredRows.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="px-4 py-4">
+                    <td colSpan={7} className="px-4 py-4">
                       <EmptyState title="No chapters found" description="Add a chapter for the selected subject." />
                     </td>
                   </tr>
@@ -763,6 +934,14 @@ export function ChaptersPage() {
                           onDragEnd={onDragEndChapter}
                           className={`hover:bg-slate-50/70 ${dragOverChapterId === row.id ? "bg-brand/5" : ""}`}
                         >
+                          <td className="px-4 py-3 text-center">
+                            <input
+                              type="checkbox"
+                              checked={selectedChapterIds.includes(row.id)}
+                              onChange={() => toggleChapterSelection(row.id)}
+                              className="h-4 w-4"
+                            />
+                          </td>
                           <td className="px-4 py-3">
                             <span className={`inline-flex select-none rounded border px-2 py-1 text-xs ${dragDisabled ? "cursor-not-allowed border-slate-200 text-slate-300" : "cursor-grab border-slate-300 text-slate-500"}`}>
                               ::
@@ -853,7 +1032,7 @@ export function ChaptersPage() {
                         </tr>
                         {isTopicsOpen && (
                           <tr className="bg-slate-50/60">
-                            <td colSpan={6} className="px-4 py-4">
+                            <td colSpan={7} className="px-4 py-4">
                               <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
                                 <div className="flex items-center justify-between">
                                   <div>
@@ -874,8 +1053,9 @@ export function ChaptersPage() {
                                       onChange={setTopicTitle}
                                       suggestion={findSuggestion(topicTitle, topicSuggestions)}
                                       onKeyDown={onTopicTitleKeyDown}
-                                      placeholder="Type topic title (Tab to autocomplete)"
+                                      placeholder="e.g. Basics, Exercise 1, Review (Tab autocomplete per token)"
                                     />
+                                    <p className="mt-1 text-[10px] text-slate-500">Comma separated topic titles are supported.</p>
                                   </label>
                                   <label className="text-xs font-semibold text-slate-600">
                                     Number
@@ -1081,6 +1261,15 @@ export function ChaptersPage() {
         loading={isDeleting}
         onCancel={() => setDeleteTarget(null)}
         onConfirm={commitDelete}
+      />
+      <ConfirmModal
+        open={bulkDeleteOpen}
+        title="Delete Selected Chapters"
+        message={`Delete ${selectedChapterIds.length} selected chapter(s)?\n\nRelated topics and questions under these chapters will also be removed.`}
+        confirmLabel="Delete Selected"
+        loading={bulkDeleting}
+        onCancel={() => setBulkDeleteOpen(false)}
+        onConfirm={confirmBulkDelete}
       />
       <ConfirmModal
         open={!!topicDeleteTarget}

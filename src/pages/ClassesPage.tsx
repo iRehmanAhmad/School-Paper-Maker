@@ -58,6 +58,9 @@ export function ClassesPage() {
   const [subjectCountByClass, setSubjectCountByClass] = useState<Record<string, number>>({});
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; message: string } | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [selectedClassIds, setSelectedClassIds] = useState<string[]>([]);
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
 
   useEffect(() => {
     setExamBodyId(scope.examBodyId || "");
@@ -96,6 +99,10 @@ export function ClassesPage() {
   useEffect(() => {
     load();
   }, [profile?.school_id, examBodyId]);
+
+  useEffect(() => {
+    setSelectedClassIds((prev) => prev.filter((id) => rows.some((row) => row.id === id)));
+  }, [rows]);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -162,6 +169,60 @@ export function ClassesPage() {
     }
   }
 
+  function toggleClassSelection(id: string) {
+    setSelectedClassIds((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]));
+  }
+
+  function toggleSelectAllFilteredClasses() {
+    if (!filteredRows.length) return;
+    const visibleIds = filteredRows.map((row) => row.id);
+    const allSelected = visibleIds.every((id) => selectedClassIds.includes(id));
+    setSelectedClassIds((prev) => {
+      if (allSelected) {
+        return prev.filter((id) => !visibleIds.includes(id));
+      }
+      const next = new Set(prev);
+      visibleIds.forEach((id) => next.add(id));
+      return Array.from(next);
+    });
+  }
+
+  async function confirmBulkDelete() {
+    if (!selectedClassIds.length) return;
+    setBulkDeleting(true);
+    const targets = [...selectedClassIds];
+    let deleted = 0;
+    let failed = 0;
+    for (const id of targets) {
+      try {
+        await deleteClass(id);
+        deleted += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    if (deleted > 0) {
+      setRows((prev) => prev.filter((row) => !targets.includes(row.id)));
+      setSubjectCountByClass((prev) => {
+        const next = { ...prev };
+        targets.forEach((id) => delete next[id]);
+        return next;
+      });
+      if (scope.classId && targets.includes(scope.classId)) {
+        clearFrom("classId");
+      }
+    }
+    setSelectedClassIds([]);
+    setBulkDeleteOpen(false);
+    setBulkDeleting(false);
+    if (deleted > 0) {
+      toast("success", `${deleted} class(es) deleted${failed ? `, ${failed} failed` : ""}`);
+    } else {
+      toast("error", "Failed to delete selected classes");
+    }
+    await load();
+  }
+
   function onClassNameKeyDown(e: KeyboardEvent<HTMLInputElement>) {
     if (e.key !== "Tab") return;
     const suggestion = findSuggestion(name, classSuggestions);
@@ -184,6 +245,7 @@ export function ClassesPage() {
       ? rows.find((row) => row.exam_body_id === examBodyId && row.name.trim().toLowerCase() === normalizedName)
       : null;
   const canAdd = Boolean(profile?.school_id && examBodyId && name.trim() && !duplicateRow);
+  const allFilteredSelected = filteredRows.length > 0 && filteredRows.every((row) => selectedClassIds.includes(row.id));
 
   return (
     <div className="space-y-4">
@@ -295,15 +357,35 @@ export function ClassesPage() {
               <h3 className="text-sm font-bold uppercase tracking-wider text-slate-500">Existing Classes</h3>
               <p className="text-xs text-slate-500">{filteredRows.length} of {rows.length} shown</p>
             </div>
-            <label className="w-full max-w-sm text-xs font-semibold text-slate-600">
-              Search Class
-              <input
-                className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Type to filter classes"
-              />
-            </label>
+            <div className="w-full max-w-sm space-y-2">
+              <label className="block text-xs font-semibold text-slate-600">
+                Search Class
+                <input
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Type to filter classes"
+                />
+              </label>
+              <div className="flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={toggleSelectAllFilteredClasses}
+                  disabled={!filteredRows.length}
+                  className="rounded border border-slate-200 px-2 py-1 text-[11px] font-semibold text-slate-600 hover:border-brand hover:text-brand disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {allFilteredSelected ? "Unselect All Shown" : "Select All Shown"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBulkDeleteOpen(true)}
+                  disabled={!selectedClassIds.length}
+                  className="rounded bg-red-100 px-2 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-200 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  Delete Selected ({selectedClassIds.length})
+                </button>
+              </div>
+            </div>
           </div>
 
           <div className="mt-3 space-y-2">
@@ -318,6 +400,12 @@ export function ClassesPage() {
                 <article key={row.id} className="rounded-xl border border-slate-200 bg-slate-50/30 p-3 text-sm">
                   {editId === row.id ? (
                     <div className="flex w-full items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={selectedClassIds.includes(row.id)}
+                        onChange={() => toggleClassSelection(row.id)}
+                        className="h-4 w-4"
+                      />
                       <input className="w-full rounded-lg border border-slate-300 px-3 py-2" value={editName} onChange={(e) => setEditName(e.target.value)} />
                       <button
                         type="button"
@@ -340,12 +428,20 @@ export function ClassesPage() {
                   ) : (
                     <>
                       <div className="flex items-start justify-between gap-2">
-                        <h4 className="truncate text-sm font-bold text-slate-800">
-                          {row.name}
-                          <span className="ml-1 text-[11px] font-medium text-slate-500">
-                            ({examBodyNameById[row.exam_body_id] || "Exam Body"}, Updated {formatDateShort(row.created_at)})
-                          </span>
-                        </h4>
+                        <div className="flex items-start gap-2">
+                          <input
+                            type="checkbox"
+                            checked={selectedClassIds.includes(row.id)}
+                            onChange={() => toggleClassSelection(row.id)}
+                            className="mt-0.5 h-4 w-4"
+                          />
+                          <h4 className="truncate text-sm font-bold text-slate-800">
+                            {row.name}
+                            <span className="ml-1 text-[11px] font-medium text-slate-500">
+                              ({examBodyNameById[row.exam_body_id] || "Exam Body"}, Updated {formatDateShort(row.created_at)})
+                            </span>
+                          </h4>
+                        </div>
                       </div>
                       <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 pt-2">
                         <div className="flex flex-wrap items-center gap-1.5">
@@ -385,6 +481,15 @@ export function ClassesPage() {
         loading={isDeleting}
         onCancel={() => setDeleteTarget(null)}
         onConfirm={commitDelete}
+      />
+      <ConfirmModal
+        open={bulkDeleteOpen}
+        title="Delete Selected Classes"
+        message={`Delete ${selectedClassIds.length} selected class(es)?\n\nThis will remove related subjects, chapters, and questions as configured.`}
+        confirmLabel="Delete Selected"
+        loading={bulkDeleting}
+        onCancel={() => setBulkDeleteOpen(false)}
+        onConfirm={confirmBulkDelete}
       />
     </div>
   );

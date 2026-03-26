@@ -232,6 +232,9 @@ export async function deleteContentSource(sourceId: string) {
       .select("file_path")
       .eq("id", sourceId)
       .single();
+    if (fetchError && fetchError.code !== "PGRST116") {
+      throw fetchError;
+    }
     
     // 2. Delete from Storage if it's a cloud path
     if (source?.file_path && String(source.file_path).includes("/")) {
@@ -248,8 +251,14 @@ export async function deleteContentSource(sourceId: string) {
     }
 
     // 3. Delete DB record (will cascade-delete chunks if set in DB, else we do it)
-    const { error: deleteError } = await supabase!.from("content_sources").delete().eq("id", sourceId);
+    const { error: deleteError, count } = await supabase!
+      .from("content_sources")
+      .delete({ count: "exact" })
+      .eq("id", sourceId);
     if (deleteError) throw deleteError;
+    if ((count ?? 0) <= 0) {
+      throw new Error("Source was not deleted. It may already be removed or you may not have permission.");
+    }
     
     // 4. Manually cleanup chunks just in case DB cascade is not set
     await supabase!.from("content_chunks").delete().eq("source_id", sourceId);
@@ -257,7 +266,13 @@ export async function deleteContentSource(sourceId: string) {
     return;
   }
   
-  writeLocal(DB.contentSources, readLocal<ContentSource>(DB.contentSources).filter((row) => row.id !== sourceId));
+  const sourceRows = readLocal<ContentSource>(DB.contentSources);
+  const nextSources = sourceRows.filter((row) => row.id !== sourceId);
+  const deleted = sourceRows.length - nextSources.length;
+  if (deleted <= 0) {
+    throw new Error("Source not found");
+  }
+  writeLocal(DB.contentSources, nextSources);
   writeLocal(DB.contentChunks, readLocal<ContentChunk>(DB.contentChunks).filter((row) => row.source_id !== sourceId));
 }
 

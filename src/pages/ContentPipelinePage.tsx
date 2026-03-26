@@ -32,6 +32,7 @@ import { SourceManager } from "@/components/pipeline/SourceManager";
 import { JobQueue } from "@/components/pipeline/JobQueue";
 import { CandidateReview } from "@/components/pipeline/CandidateReview";
 import { ResourceLibrary } from "@/components/pipeline/ResourceLibrary";
+import { ConfirmModal } from "@/components/ConfirmModal";
 import { Layers, Zap, CheckSquare, Sparkles, ChevronRight, ChevronLeft, Trash2, AlertCircle, Library } from "lucide-react";
 import { PdfCanvasViewer } from "@/components/pipeline/PdfCanvasViewer";
 
@@ -134,6 +135,8 @@ export function ContentPipelinePage() {
   const [allSchoolChapters, setAllSchoolChapters] = useState<any[]>([]);
   const [loadingLibrary, setLoadingLibrary] = useState(false);
   const [generationRunReport, setGenerationRunReport] = useState<GenerationRunReport | null>(null);
+  const [pendingDeleteSourceId, setPendingDeleteSourceId] = useState("");
+  const [deleteSourceLoading, setDeleteSourceLoading] = useState(false);
 
   const activeSource = sources.find((source) => source.id === activePreviewSourceId) || null;
   const selectedQueueSource = sources.find((source) => source.id === selectedSourceId) || null;
@@ -325,7 +328,7 @@ export function ContentPipelinePage() {
 
   useEffect(() => {
     // Sync preview source when moving to Generation tab
-    if (activeStep === 2 && selectedSourceId && activePreviewSourceId !== selectedSourceId) {
+    if (activeStep === 3 && selectedSourceId && activePreviewSourceId !== selectedSourceId) {
       setActivePreviewSourceId(selectedSourceId);
       loadPreviewChunks(selectedSourceId);
     }
@@ -882,20 +885,56 @@ export function ContentPipelinePage() {
     }
   }
 
-  async function onDeleteSource(sourceId: string) {
-    if (!confirm("Are you sure you want to permanently delete this source and all its data?")) return;
+  async function performDeleteSource(sourceId: string) {
+    setDeleteSourceLoading(true);
     try {
       await deleteContentSource(sourceId);
       toast("success", "Source deleted successfully");
+
+      setSources((prev) => prev.filter((source) => source.id !== sourceId));
+      setAllSchoolSources((prev) => prev.filter((source) => source.id !== sourceId));
+      setChunkCountBySource((prev) => {
+        const next = { ...prev };
+        delete next[sourceId];
+        return next;
+      });
+
+      setLocalPdfPreviewUrls((prev) => {
+        const existing = prev[sourceId];
+        if (existing) {
+          try {
+            URL.revokeObjectURL(existing);
+          } catch {
+            // ignore revoke errors
+          }
+        }
+        const next = { ...prev };
+        delete next[sourceId];
+        return next;
+      });
+
       if (activePreviewSourceId === sourceId) {
         setActivePreviewSourceId("");
         setPreviewChunks([]);
       }
       if (selectedSourceId === sourceId) setSelectedSourceId("");
-      await loadData();
+      await Promise.all([loadData(), loadLibrary()]);
     } catch (error) {
       toast("error", error instanceof Error ? error.message : "Failed to delete source");
+    } finally {
+      setDeleteSourceLoading(false);
     }
+  }
+
+  async function onDeleteSource(sourceId: string) {
+    setPendingDeleteSourceId(sourceId);
+  }
+
+  async function onConfirmDeleteSource() {
+    const sourceId = String(pendingDeleteSourceId || "").trim();
+    if (!sourceId) return;
+    await performDeleteSource(sourceId);
+    setPendingDeleteSourceId("");
   }
 
   async function ingestSourceById(sourceId: string, options?: { silent?: boolean }) {
@@ -1485,7 +1524,7 @@ export function ContentPipelinePage() {
           />
         )}
 
-        {activeStep === 2 && (
+        {activeStep === 3 && (
           <JobQueue 
             artifact={artifact}
             setArtifact={setArtifact}
@@ -1538,7 +1577,7 @@ export function ContentPipelinePage() {
           />
         )}
 
-        {activeStep === 3 && (
+        {activeStep === 4 && (
           <CandidateReview 
             candidates={contextCandidates}
             selectedCandidateIds={selectedCandidateIds}
@@ -1574,7 +1613,7 @@ export function ContentPipelinePage() {
         
         <button
           type="button"
-          disabled={activeStep === 3}
+          disabled={activeStep === 4}
           onClick={() => setActiveStep(prev => prev + 1)}
           className="flex items-center gap-2 px-8 py-3 rounded-full bg-slate-900 dark:bg-white text-white dark:text-slate-900 shadow-xl text-xs font-bold disabled:opacity-30 disabled:translate-y-2 transition-all hover:scale-[1.02] active:scale-[0.98]"
         >
@@ -1728,6 +1767,19 @@ export function ContentPipelinePage() {
            </div>
         </div>
       )}
+
+      <ConfirmModal
+        open={Boolean(pendingDeleteSourceId)}
+        title="Delete Source?"
+        message="This will permanently delete the source, its chunks, and related generated data links for this context."
+        confirmLabel="Delete Source"
+        cancelLabel="Cancel"
+        loading={deleteSourceLoading}
+        onCancel={() => {
+          if (!deleteSourceLoading) setPendingDeleteSourceId("");
+        }}
+        onConfirm={onConfirmDeleteSource}
+      />
     </div>
   );
 }

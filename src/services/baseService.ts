@@ -148,43 +148,30 @@ export type DeleteImpact = {
   questions: number;
 };
 
-function defaultTopicTitles(chapterTitle: string) {
-  const base = chapterTitle.trim() || "Chapter";
-  return [`${base} Basics`, `${base} Practice`];
-}
-
 function ensureTopicStructure() {
   const chapters = readLocal<ChapterEntity>(DB.chapters);
-  if (!chapters.length) {
-    return;
-  }
-
   const existingTopics = readLocal<TopicEntity>(DB.topics);
-  const topicsByChapter = new Map<string, TopicEntity[]>();
-  existingTopics.forEach((topic) => {
-    const group = topicsByChapter.get(topic.chapter_id) ?? [];
-    group.push(topic);
-    topicsByChapter.set(topic.chapter_id, group);
-  });
-
   let nextTopics = [...existingTopics];
   let topicsChanged = false;
 
+  // Legacy cleanup: remove auto-generated fallback topics from older builds.
+  // We only remove when both topics exactly match "<chapter> Basics/Practice"
+  // and no question is tagged to them.
+  const questionsSnapshot = readLocal<Question>(DB.questions);
+  const usedTopicIds = new Set(questionsSnapshot.map((q) => q.topic_id).filter(Boolean) as string[]);
   for (const chapter of chapters) {
-    const chapterTopics = (topicsByChapter.get(chapter.id) ?? []).sort((a, b) => a.topic_number - b.topic_number);
-    if (chapterTopics.length > 0) {
-      continue;
-    }
-    const defaults = defaultTopicTitles(chapter.title);
-    const created = defaults.map((title, index) => ({
-      id: crypto.randomUUID(),
-      chapter_id: chapter.id,
-      title,
-      topic_number: index + 1,
-      created_at: new Date().toISOString(),
-    }));
-    nextTopics = [...created, ...nextTopics];
-    topicsByChapter.set(chapter.id, created);
+    const chapterTopics = nextTopics
+      .filter((topic) => topic.chapter_id === chapter.id)
+      .sort((a, b) => a.topic_number - b.topic_number);
+    if (chapterTopics.length !== 2) continue;
+    const expected = new Set([`${chapter.title.trim()} Basics`.toLowerCase(), `${chapter.title.trim()} Practice`.toLowerCase()]);
+    const actual = new Set(chapterTopics.map((topic) => topic.title.trim().toLowerCase()));
+    const isLegacyPair = expected.size === actual.size && [...expected].every((item) => actual.has(item));
+    if (!isLegacyPair) continue;
+    const hasTaggedQuestions = chapterTopics.some((topic) => usedTopicIds.has(topic.id));
+    if (hasTaggedQuestions) continue;
+    const deleteIds = new Set(chapterTopics.map((topic) => topic.id));
+    nextTopics = nextTopics.filter((topic) => !deleteIds.has(topic.id));
     topicsChanged = true;
   }
 
@@ -192,29 +179,18 @@ function ensureTopicStructure() {
     writeLocal(DB.topics, nextTopics);
   }
 
-  const currentTopics = topicsChanged ? nextTopics : existingTopics;
-  const firstTopicByChapter = new Map<string, string>();
-  currentTopics
-    .slice()
-    .sort((a, b) => a.topic_number - b.topic_number)
-    .forEach((topic) => {
-      if (!firstTopicByChapter.has(topic.chapter_id)) {
-        firstTopicByChapter.set(topic.chapter_id, topic.id);
-      }
-    });
-
   const questions = readLocal<Question>(DB.questions);
+  const topicIdSet = new Set(nextTopics.map((topic) => topic.id));
   let questionsChanged = false;
   const patchedQuestions = questions.map((question) => {
-    if (question.topic_id) {
+    if (!question.topic_id) {
       return question;
     }
-    const fallbackTopicId = firstTopicByChapter.get(question.chapter_id);
-    if (!fallbackTopicId) {
+    if (topicIdSet.has(question.topic_id)) {
       return question;
     }
     questionsChanged = true;
-    return { ...question, topic_id: fallbackTopicId };
+    return { ...question, topic_id: null };
   });
 
   if (questionsChanged) {
