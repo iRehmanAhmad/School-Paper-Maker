@@ -18,6 +18,7 @@ import {
   assertCanGenerateArtifact,
   deleteGenerationCandidates,
   reviewGenerationCandidate,
+  updateGenerationJob,
   updateContentSourceFilePath,
   deleteContentSource,
 } from "@/services/repositories";
@@ -26,6 +27,7 @@ import { cacheSourceText } from "@/services/sourceTextCache";
 import { canUseSupabase, supabase } from "@/services/supabase";
 import { invokeIngestSource, invokePublishCandidates, invokeRunGenerationJobs } from "@/services/pipelineRuntime";
 import type { ArtifactType, BloomLevel, ContentChunk, ContentSource, Difficulty, GenerationCandidate, GenerationJob, QuestionType, TopicEntity } from "@/types/domain";
+import { useNavigate } from "react-router-dom";
 import { SourceManager } from "@/components/pipeline/SourceManager";
 import { JobQueue } from "@/components/pipeline/JobQueue";
 import { CandidateReview } from "@/components/pipeline/CandidateReview";
@@ -37,6 +39,22 @@ const questionTypes: QuestionType[] = ["mcq", "true_false", "fill_blanks", "shor
 const difficulties: Difficulty[] = ["easy", "medium", "hard"];
 const blooms: BloomLevel[] = ["remember", "understand", "apply", "analyze", "evaluate"];
 
+type GenerationRunReport = {
+  timestamp: string;
+  processed: number;
+  completed: number;
+  failed: number;
+  candidatesCreated: number;
+  failedJobIds: string[];
+  topErrors: Array<{
+    message: string;
+    count: number;
+    hint: string;
+    actionKey?: "open_settings" | "retry_failed";
+    actionLabel?: string;
+  }>;
+};
+
 function sanitizeName(name: string) {
   return name.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
@@ -46,6 +64,7 @@ function sanitizeName(name: string) {
 export function ContentPipelinePage() {
   const profile = useAppStore((s) => s.profile);
   const toast = useAppStore((s) => s.pushToast);
+  const navigate = useNavigate();
   const { scope, mergeScope } = useHierarchyScopeParams();
 
   const {
@@ -114,6 +133,7 @@ export function ContentPipelinePage() {
   const [allSchoolSubjects, setAllSchoolSubjects] = useState<any[]>([]);
   const [allSchoolChapters, setAllSchoolChapters] = useState<any[]>([]);
   const [loadingLibrary, setLoadingLibrary] = useState(false);
+  const [generationRunReport, setGenerationRunReport] = useState<GenerationRunReport | null>(null);
 
   const activeSource = sources.find((source) => source.id === activePreviewSourceId) || null;
   const selectedQueueSource = sources.find((source) => source.id === selectedSourceId) || null;
@@ -959,25 +979,25 @@ export function ContentPipelinePage() {
   }
 
   async function onQueueJob() {
-    if (!profile?.school_id) return;
+    if (!profile?.school_id) return false;
     if (!examBodyId || !classId || !subjectId || !chapterId) {
       toast("error", "Select exam body, class, subject, and chapter first");
-      return;
+      return false;
     }
     if (!hasIngestedContent) {
       toast("error", "No ingested content available. Upload a source and run ingest first.");
-      return;
+      return false;
     }
     if (selectedSourceId && (chunkCountBySource[selectedSourceId] || 0) === 0) {
       toast("error", "Selected source is not ingested yet. Click Ingest for that source first.");
-      return;
+      return false;
     }
     try {
       const summary = await assertCanGenerateArtifact(profile.school_id, artifact);
       setSubscriptionSummary(summary);
     } catch (error) {
       toast("error", error instanceof Error ? error.message : "Artifact generation blocked by subscription.");
-      return;
+      return false;
     }
     setQueueingJob(true);
     try {
@@ -1029,21 +1049,106 @@ export function ContentPipelinePage() {
       });
       setJobs((prev) => [queuedJob, ...prev.filter((job) => job.id !== queuedJob.id)]);
       toast("success", "Generation job queued");
+      return true;
     } catch (error) {
       toast("error", error instanceof Error ? error.message : "Failed to queue job");
+      return false;
     } finally {
       setQueueingJob(false);
     }
   }
 
-  async function onRunJobs() {
+  function remediationForGenerationError(message: string) {
+    const msg = message.toLowerCase();
+    if (msg.includes("429") || msg.includes("rate limit") || msg.includes("too many requests")) {
+      return {
+        hint: "Provider limit reached. Retry after a short wait or switch to another key/model.",
+        actionKey: "retry_failed" as const,
+        actionLabel: "Retry Failed",
+      };
+    }
+    if (msg.includes("401") || msg.includes("unauthorized") || msg.includes("invalid api key")) {
+      return {
+        hint: "API key is invalid/expired. Re-save a valid key in Settings.",
+        actionKey: "open_settings" as const,
+        actionLabel: "Open Settings",
+      };
+    }
+    if (msg.includes("404") || msg.includes("model") && msg.includes("not found")) {
+      return {
+        hint: "Model id is not available for this provider/key. Pick a fetched model from Settings.",
+        actionKey: "open_settings" as const,
+        actionLabel: "Open Settings",
+      };
+    }
+    if (msg.includes("no ai keys configured")) {
+      return {
+        hint: "No active AI key found for current school/context. Set one active key in Settings.",
+        actionKey: "open_settings" as const,
+        actionLabel: "Open Settings",
+      };
+    }
+    if (msg.includes("json")) {
+      return {
+        hint: "Model returned malformed JSON. Retry with stricter instructions or another model.",
+        actionKey: "open_settings" as const,
+        actionLabel: "Switch Model",
+      };
+    }
+    return {
+      hint: "Retry once. If it repeats, switch provider/model and verify context page range.",
+      actionKey: "retry_failed" as const,
+      actionLabel: "Retry Failed",
+    };
+  }
+
+  function buildGenerationRunReport(result: {
+    processed: number;
+    completed: number;
+    failed: number;
+    candidates_created: number;
+    details: Array<{ job_id: string; status: "completed" | "failed"; error?: string }>;
+  }): GenerationRunReport {
+    const errorMap = new Map<string, number>();
+    const failedJobIds: string[] = [];
+    for (const detail of result.details) {
+      if (detail.status !== "failed") continue;
+      const message = String(detail.error || "Unknown generation error").trim();
+      errorMap.set(message, (errorMap.get(message) || 0) + 1);
+      if (detail.job_id) failedJobIds.push(detail.job_id);
+    }
+    const topErrors = Array.from(errorMap.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([message, count]) => {
+        const remediation = remediationForGenerationError(message);
+        return {
+          message,
+          count,
+          hint: remediation.hint,
+          actionKey: remediation.actionKey,
+          actionLabel: remediation.actionLabel,
+        };
+      });
+    return {
+      timestamp: new Date().toISOString(),
+      processed: result.processed,
+      completed: result.completed,
+      failed: result.failed,
+      candidatesCreated: result.candidates_created,
+      failedJobIds,
+      topErrors,
+    };
+  }
+
+  async function onRunJobs(options?: { skipQueuedGuard?: boolean }) {
     if (!hasIngestedContent) {
       toast("error", "No ingested content available. Upload and ingest chapter/topic source first.");
-      return;
+      return false;
     }
-    if (queuedJobsCount <= 0) {
+    if (!options?.skipQueuedGuard && queuedJobsCount <= 0) {
       toast("error", "No queued jobs in this context. Click Queue Job first.");
-      return;
+      return false;
     }
     setRunningJobs(true);
     try {
@@ -1052,9 +1157,10 @@ export function ContentPipelinePage() {
         topic_id: topicId || undefined,
         limit: 20,
       });
+      setGenerationRunReport(buildGenerationRunReport(result));
       if (result.processed <= 0) {
         toast("error", "No queued jobs were processed. Queue at least one job first.");
-        return;
+        return false;
       }
       if (result.failed > 0) {
         const failedDetails = result.details.filter((detail) => detail.status === "failed");
@@ -1075,11 +1181,69 @@ export function ContentPipelinePage() {
         );
       }
       await loadData();
+      return result.completed > 0;
     } catch (error) {
       toast("error", error instanceof Error ? error.message : "Failed to run jobs");
+      return false;
     } finally {
       setRunningJobs(false);
     }
+  }
+
+  async function onQueueAndRunNow() {
+    const queued = await onQueueJob();
+    if (!queued) return;
+    await onRunJobs({ skipQueuedGuard: true });
+  }
+
+  async function onRetryFailedJobs() {
+    const ids = Array.from(new Set(generationRunReport?.failedJobIds || []));
+    if (!ids.length) {
+      toast("error", "No failed jobs found in the last run.");
+      return;
+    }
+    try {
+      await Promise.all(
+        ids.map((jobId) =>
+          updateGenerationJob(jobId, {
+            status: "queued",
+            error_message: null,
+            started_at: null,
+            finished_at: null,
+          }),
+        ),
+      );
+      setJobs((prev) =>
+        prev.map((job) =>
+          ids.includes(job.id)
+            ? {
+              ...job,
+              status: "queued",
+              error_message: null,
+              started_at: null,
+              finished_at: null,
+            }
+            : job,
+        ),
+      );
+      toast("success", `Re-queued ${ids.length} failed job(s). Running now...`);
+      await onRunJobs({ skipQueuedGuard: true });
+    } catch (error) {
+      toast("error", error instanceof Error ? error.message : "Failed to retry failed jobs");
+    }
+  }
+
+  function onRunReportAction(actionKey: "open_settings" | "retry_failed", _message: string) {
+    if (actionKey === "retry_failed") {
+      void onRetryFailedJobs();
+      return;
+    }
+    try {
+      localStorage.setItem("pg_settings_focus", "ai_provider");
+    } catch {
+      // ignore localStorage errors
+    }
+    navigate("/settings");
   }
 
   async function onReviewCandidate(candidateId: string, action: "approve" | "reject") {
@@ -1351,6 +1515,9 @@ export function ContentPipelinePage() {
             onQueueJob={onQueueJob}
             runningJobs={runningJobs}
             onRunJobs={onRunJobs}
+            onQueueAndRunNow={onQueueAndRunNow}
+            onRetryFailedJobs={onRetryFailedJobs}
+            onRunReportAction={onRunReportAction}
             pipelineBlocked={pipelineBlocked}
             artifactLocked={artifactLocked}
             hasIngestedContent={hasIngestedContent}
@@ -1367,6 +1534,7 @@ export function ContentPipelinePage() {
             chapterId={chapterId}
             worksheetLocked={worksheetLocked}
             lessonPlanLocked={lessonPlanLocked}
+            generationRunReport={generationRunReport}
           />
         )}
 
