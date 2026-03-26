@@ -6,6 +6,7 @@ import { getClasses } from "./classService";
 import { getSubjects } from "./subjectService";
 import { getChapters } from "./chapterService";
 import { assertCanGeneratePaper } from "./subscriptionService";
+import { localizeAnswerText, localizeBilingualText } from "@/lib/bilingual";
 
 async function getSchoolIdForPaperClass(classId: string) {
     if (canUseSupabase()) {
@@ -113,6 +114,7 @@ export async function getPaperBundleById(paperId: string): Promise<any | null> {
     }, {} as Record<string, PaperQuestion[]>);
 
     const settings = paper.settings_json as any;
+    const medium = settings?.header?.medium || "English";
 
     const sets = Object.entries(setGroups).map(([setId, setMappings]) => {
         const sortedMappings = [...setMappings].sort((a, b) => a.order_number - b.order_number);
@@ -132,12 +134,14 @@ export async function getPaperBundleById(paperId: string): Promise<any | null> {
                 setLabel: m.paper_set,
                 section: isObjective ? "Objective Section" : "Subjective Section",
                 questionType: q.question_type,
-                questionText: q.question_text,
-                options: m.shuffled_options || [q.option_a, q.option_b, q.option_c, q.option_d].filter(Boolean) as string[],
-                correctAnswer: q.correct_answer,
+                questionText: localizeBilingualText(q.question_text, medium),
+                options: (m.shuffled_options || [q.option_a, q.option_b, q.option_c, q.option_d].filter(Boolean) as string[])
+                    .map((opt) => localizeBilingualText(opt, medium))
+                    .filter(Boolean),
+                correctAnswer: localizeAnswerText(q.correct_answer, medium) || null,
                 marks: matchingSection?.marks || 1,
                 emptyLines: matchingSection?.empty_lines,
-                explanation: q.explanation,
+                explanation: localizeBilingualText(q.explanation, medium) || null,
                 diagramUrl: q.diagram_url,
             };
         }).filter(Boolean);

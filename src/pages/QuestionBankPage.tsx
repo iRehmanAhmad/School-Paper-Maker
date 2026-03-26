@@ -1738,7 +1738,10 @@ export function QuestionBankPage() {
                   {manualValidationActive && manualErrors.context && <p className="text-xs font-semibold text-red-600">{manualErrors.context}</p>}
 
                   <div className="flex items-center justify-between">
-                    <label className="text-xs font-semibold text-slate-600">Question Text</label>
+                    <label className="text-xs font-semibold text-slate-600">
+                      Question Text
+                      <span className="ml-2 text-[10px] font-bold text-brand/80">Bilingual format: English || Urdu</span>
+                    </label>
                     <button type="button" onClick={() => setShowPreview(!showPreview)} className="text-[10px] font-bold text-brand uppercase hover:underline">
                       {showPreview ? "Show Editor" : "Show Preview"}
                     </button>
@@ -1899,6 +1902,7 @@ export function QuestionBankPage() {
                   <div className="space-y-1">
                     <h3 className="font-display text-xl font-bold">Smart Bulk Upload</h3>
                     <p className="text-sm text-slate-500">Step-by-step import: select file, map columns, preview rows, then confirm upload.</p>
+                    <p className="text-xs font-semibold text-brand/80">For bilingual papers, put both languages in the same cell using: English || Urdu</p>
                   </div>
 
                   <QuestionTypeSelector presets={quickPresets} activeType={questionType} onSelect={(preset) => { setQuestionType(preset.type); setDiff(preset.diff); setBloom(preset.bloom); }} />
@@ -1968,6 +1972,7 @@ export function QuestionBankPage() {
                       <div className="rounded-xl bg-brand/5 p-4">
                         <p className="text-xs font-bold text-brand uppercase tracking-widest">Column Mapping</p>
                         <p className="text-xs text-brand/70">Map your file headers with required fields. `question_text` is mandatory.</p>
+                        <p className="text-[11px] text-brand/80">Tip: `question_text` / options can contain bilingual text like `Water boils at 100C || پانی 100C پر ابلتا ہے`.</p>
                       </div>
                       <div className="grid gap-4 md:grid-cols-2">
                         {["question_text", "correct_answer", "difficulty", "bloom_level", ...(questionType === "mcq" ? ["option_a", "option_b", "option_c", "option_d"] : [])].map((sys) => (

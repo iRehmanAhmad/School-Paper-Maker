@@ -12,6 +12,7 @@ import type {
   QuestionType,
   QuestionLevel,
 } from "@/types/domain";
+import { localizeAnswerText, localizeBilingualText } from "@/lib/bilingual";
 
 type GenerationInput = {
   settings: GeneratorSettings;
@@ -116,8 +117,11 @@ function sectionLabel(type: QuestionType) {
   return "Subjective Section";
 }
 
-function optionsFor(q: Question, shouldShuffle: boolean) {
-  const opts = [q.option_a, q.option_b, q.option_c, q.option_d].filter(Boolean) as string[];
+function optionsFor(q: Question, shouldShuffle: boolean, medium: GeneratorSettings["header"]["medium"]) {
+  const opts = [q.option_a, q.option_b, q.option_c, q.option_d]
+    .filter(Boolean)
+    .map((opt) => localizeBilingualText(opt, medium))
+    .filter(Boolean) as string[];
   return shouldShuffle ? random(opts) : opts;
 }
 
@@ -127,6 +131,7 @@ export function generatePaperBundle(input: GenerationInput): {
   usage: QuestionUsage[];
 } {
   const { settings, sections, questions, recentUsage, teacherId } = input;
+  const medium = settings.header?.medium || "English";
   const paperId = crypto.randomUUID();
   const recentlyUsedIds = new Set(recentUsage.map((u) => u.question_id));
   const sets: GeneratedSet[] = [];
@@ -161,12 +166,12 @@ export function generatePaperBundle(input: GenerationInput): {
           setLabel: label,
           section: sectionLabel(q.question_type),
           questionType: q.question_type,
-          questionText: q.question_text,
-          options: optionsFor(q, true),
-          correctAnswer: q.correct_answer,
+          questionText: localizeBilingualText(q.question_text, medium),
+          options: optionsFor(q, true, medium),
+          correctAnswer: localizeAnswerText(q.correct_answer, medium) || null,
           marks: section.marks,
           emptyLines: section.empty_lines,
-          explanation: q.explanation,
+          explanation: localizeBilingualText(q.explanation, medium) || null,
           diagramUrl: q.diagram_url,
         });
       });

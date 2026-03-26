@@ -1144,9 +1144,9 @@ export function PaperGeneratorPage() {
                 {/* Paper Settings */}
                 <div className="flex flex-wrap items-center gap-3">
                   <select className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-[10px] font-bold text-slate-700 outline-none focus:border-brand" value={header.medium} onChange={(e) => setHeader({ ...header, medium: e.target.value as any })}>
-                    <option value="English">Medium: English</option>
-                    <option value="Urdu">Medium: Urdu</option>
-                    <option value="Both">Medium: Both</option>
+                    <option value="English">Language: English</option>
+                    <option value="Urdu">Language: Urdu</option>
+                    <option value="Both">Language: Both</option>
                   </select>
                   <select className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-[10px] font-bold text-slate-700 outline-none focus:border-brand" value={header.paperSize} onChange={(e) => setHeader({ ...header, paperSize: e.target.value as any })}>
                     <option value="A4">Size: A4</option>
